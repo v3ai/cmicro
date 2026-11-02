@@ -156,6 +156,24 @@ def test_wide_chars_at_the_edge():
     assert finish(t)
 
 
+def test_wordwrap_wide_char_after_break():
+    # a tab wider than the pane right after a space: no duplicate (empty)
+    # wrap row, and Up must leave the line
+    p = write("ww.txt", b"z\na \tb\n")
+    t = editor([p], cols=4, rows=10, extra=["-ruler", "off", "-softwrap", "on", "-wordwrap", "on",
+                                            "-tabsize", "8", "-statusformatl", "$(line)",
+                                            "-statusformatr", ""])
+    t.send(DOWN, 0.1)
+    t.send(b"\x1b[C\x1b[C", 0.2)
+    assert [t.line(y).rstrip() for y in range(4)] == ["z", "a", "", "b"], t.text()
+    assert t.cursor() == (0, 2), t.cursor()
+    t.send(UP, 0.1)
+    t.send(UP, 0.2)
+    assert t.cursor() == (0, 0) and t.line(8).strip() == "1", (t.cursor(), t.text())
+    assert full_redraw_matches(t)
+    assert finish(t)
+
+
 def test_many_tabs_and_splits():
     p = write("t.txt", b"x\n")
     t = editor([p], cols=60, rows=20)
