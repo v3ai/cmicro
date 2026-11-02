@@ -6,9 +6,14 @@
 
 typedef struct Region Region;
 
+/* syntax.c-private search prefilter derived from a rule's regex source
+   (NULL: none).  Shared, like the Regex, between copies of included rules. */
+typedef struct ReFilter ReFilter;
+
 typedef struct {
     int group;
     Regex *re;
+    ReFilter *flt;
 } Pattern;
 
 typedef struct {
@@ -23,6 +28,7 @@ struct Region {
     Regex *start, *end, *skip;
     Region *parent;
     Rules rules;
+    ReFilter *start_flt, *end_flt, *skip_flt;
 };
 
 typedef struct Syntax {
