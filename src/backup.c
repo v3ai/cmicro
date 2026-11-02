@@ -307,10 +307,13 @@ int buf_save_sudo(Buffer *b, const char *path, char **err) {
         free(exp);
         return -1;
     }
-    free(exp);
-    if (strcmp(b->path, path) != 0) buf_set_name(b, path);
+    if (strcmp(b->path, path) != 0) {
+        backup_remove(b); /* the old name's backup */
+        buf_set_name(b, path);
+    }
     b->is_new = 0;
-    b->mtime = plat_mtime(b->path);
+    b->mtime = plat_mtime(exp);
+    free(exp);
     buf_mark_saved(b);
     backup_remove(b);
     return 0;

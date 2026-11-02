@@ -795,6 +795,7 @@ int buf_save(Buffer *b, const char *path, char **err) {
     {
         int was_unnamed = !*b->path || strcmp(b->path, path) != 0;
         if (was_unnamed) {
+            backup_remove(b); /* the old name's backup */
             buf_set_name(b, path);
             if (!strcmp(BOPTS(b, O_FILETYPE), "unknown")) buf_update_rules(b);
         }
@@ -887,7 +888,7 @@ void buf_update_rules(Buffer *b) {
 void buf_ensure_hl(Buffer *b, int y) {
     Line *ln;
     Region *prev;
-    if (!b->syn || !BOPT(b, O_SYNTAX) || y >= b->nlines) return;
+    if (!b->syn || !BOPT(b, O_SYNTAX) || y < 0 || y >= b->nlines) return;
     while (b->states_valid < y) {
         int j = b->states_valid;
         Region *st = j > 0 ? b->lines[j - 1].state : NULL;
