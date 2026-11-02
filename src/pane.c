@@ -118,6 +118,15 @@ int pane_text_height(const Pane *p) {
     return h < 1 ? 1 : h;
 }
 
+int pane_tabsize(const Buffer *b) {
+    /* the option only guarantees > 0; huge values would make column math
+       overflow and tab drawing loop for ages */
+    return clampi(BOPT(b, O_TABSIZE), 1, PANE_MAX_TABSIZE);
+}
+
+/* visual columns saturate instead of overflowing on absurdly long lines */
+int vx_add(int vx, int w) { return w > PANE_MAX_VX - vx ? PANE_MAX_VX : vx + w; }
+
 static int char_cols(int cp, int vx, int tabsize) {
     if (cp == '\t') return tabsize - (vx % tabsize);
     return char_width(cp);
@@ -125,11 +134,11 @@ static int char_cols(int cp, int vx, int tabsize) {
 
 int pane_visual_x(const Pane *p, int y, int x) {
     const Line *ln = &p->buf->lines[y];
-    int i = 0, vx = 0, ts = BOPT(p->buf, O_TABSIZE);
+    int i = 0, vx = 0, ts = pane_tabsize(p->buf);
     if (x > ln->len) x = ln->len;
     while (i < x) {
         int cp, n = utf8_decode(ln->s + i, ln->len - i, &cp);
-        vx += char_cols(cp, vx, ts);
+        vx = vx_add(vx, char_cols(cp, vx, ts));
         i += n;
     }
     return vx;
@@ -137,12 +146,12 @@ int pane_visual_x(const Pane *p, int y, int x) {
 
 int pane_x_from_visual(const Pane *p, int y, int target) {
     const Line *ln = &p->buf->lines[y];
-    int i = 0, vx = 0, ts = BOPT(p->buf, O_TABSIZE);
+    int i = 0, vx = 0, ts = pane_tabsize(p->buf);
     while (i < ln->len) {
         int cp, n = utf8_decode(ln->s + i, ln->len - i, &cp);
-        int w = char_cols(cp, vx, ts);
-        if (vx + w > target) return i;
-        vx += w;
+        int nvx = vx_add(vx, char_cols(cp, vx, ts));
+        if (nvx > target) return i;
+        vx = nvx;
         i += n;
     }
     return ln->len;
@@ -167,12 +176,59 @@ static void wrap_push(int bx, int vx) {
     wrap.n++;
 }
 
+/* Wrapping a line is O(length) and happens several times per key press
+   (scrolling, cursor movement, drawing). For long lines the last result is
+   kept together with a copy of the line, and reused when the line is
+   byte-for-byte the same (a memcmp is far cheaper than decoding). */
+#define WRAP_CACHE_MIN 4096
+
+static struct {
+    char *s;
+    int len, cap, width, ts, ww, n, valid;
+    int *bx, *vx;
+} wcache;
+
+static int wrap_cache_get(const Line *ln, int width, int ts, int ww) {
+    if (!wcache.valid || wcache.len != ln->len || wcache.width != width || wcache.ts != ts ||
+        wcache.ww != ww || memcmp(wcache.s, ln->s, (size_t)ln->len) != 0)
+        return 0;
+    if (wcache.n > wrap.cap) {
+        wrap.cap = wcache.n;
+        wrap.bx = xrealloc(wrap.bx, sizeof(int) * (size_t)wrap.cap);
+        wrap.vx = xrealloc(wrap.vx, sizeof(int) * (size_t)wrap.cap);
+    }
+    memcpy(wrap.bx, wcache.bx, sizeof(int) * (size_t)wcache.n);
+    memcpy(wrap.vx, wcache.vx, sizeof(int) * (size_t)wcache.n);
+    wrap.n = wcache.n;
+    return 1;
+}
+
+static void wrap_cache_put(const Line *ln, int width, int ts, int ww) {
+    if (ln->len + 1 > wcache.cap) {
+        wcache.cap = ln->len + 1;
+        free(wcache.s);
+        wcache.s = xmalloc((size_t)wcache.cap);
+    }
+    memcpy(wcache.s, ln->s, (size_t)ln->len);
+    wcache.bx = xrealloc(wcache.bx, sizeof(int) * (size_t)wrap.n);
+    wcache.vx = xrealloc(wcache.vx, sizeof(int) * (size_t)wrap.n);
+    memcpy(wcache.bx, wrap.bx, sizeof(int) * (size_t)wrap.n);
+    memcpy(wcache.vx, wrap.vx, sizeof(int) * (size_t)wrap.n);
+    wcache.n = wrap.n;
+    wcache.len = ln->len;
+    wcache.width = width;
+    wcache.ts = ts;
+    wcache.ww = ww;
+    wcache.valid = 1;
+}
+
 static void compute_wrap(const Pane *p, int y) {
     const Line *ln = &p->buf->lines[y];
-    int width = pane_text_width(p), ts = BOPT(p->buf, O_TABSIZE);
+    int width = pane_text_width(p), ts = pane_tabsize(p->buf);
     int ww = BOPT(p->buf, O_WORDWRAP);
     int i = 0, vx = 0, rowvx = 0;
     int last_break_b = -1, last_break_v = 0;
+    if (ln->len >= WRAP_CACHE_MIN && wrap_cache_get(ln, width, ts, ww)) return;
     wrap.n = 0;
     wrap_push(0, 0);
     while (i < ln->len) {
@@ -193,7 +249,7 @@ static void compute_wrap(const Pane *p, int y) {
                 last_break_b = -1;
             }
         }
-        vx += w;
+        vx = vx_add(vx, w);
         i += n;
         if (ww && (cp == ' ' || cp == '\t')) {
             last_break_b = i;
@@ -203,6 +259,7 @@ static void compute_wrap(const Pane *p, int y) {
     /* like micro: when the last row is exactly full, the end-of-line
        position (where the cursor can sit) starts a new row */
     if (vx - rowvx >= width && vx > rowvx) wrap_push(ln->len, vx);
+    if (ln->len >= WRAP_CACHE_MIN) wrap_cache_put(ln, width, ts, ww);
 }
 
 int pane_line_rows(const Pane *p, int y) {
@@ -211,22 +268,45 @@ int pane_line_rows(const Pane *p, int y) {
     return wrap.n;
 }
 
+int pane_wrap_line(const Pane *p, int y, const int **bx, const int **vx) {
+    compute_wrap(p, y);
+    *bx = wrap.bx;
+    *vx = wrap.vx;
+    return wrap.n;
+}
+
 void pane_loc_to_row(const Pane *p, Loc l, int *row, int *rvx) {
-    int vx = pane_visual_x(p, l.y, l.x), r;
+    const Line *ln;
+    int lo, hi, i, vx, ts;
     if (!BOPT(p->buf, O_SOFTWRAP)) {
         *row = 0;
-        *rvx = vx;
+        *rvx = pane_visual_x(p, l.y, l.x);
         return;
     }
     compute_wrap(p, l.y);
-    for (r = wrap.n - 1; r > 0 && wrap.bx[r] > l.x; r--)
-        ;
-    *row = r;
-    *rvx = vx - wrap.vx[r];
+    /* last row starting at or before l.x (binary search) */
+    lo = 0;
+    hi = wrap.n - 1;
+    while (lo < hi) {
+        int mid = lo + (hi - lo + 1) / 2;
+        if (wrap.bx[mid] <= l.x) lo = mid;
+        else hi = mid - 1;
+    }
+    /* columns from the row start: no need to decode the line from 0 */
+    ln = &p->buf->lines[l.y];
+    ts = pane_tabsize(p->buf);
+    vx = wrap.vx[lo];
+    for (i = wrap.bx[lo]; i < l.x && i < ln->len;) {
+        int cp, n = utf8_decode(ln->s + i, ln->len - i, &cp);
+        vx = vx_add(vx, char_cols(cp, vx, ts));
+        i += n;
+    }
+    *row = lo;
+    *rvx = vx - wrap.vx[lo];
 }
 
 Loc pane_row_to_loc(const Pane *p, int y, int row, int rvx) {
-    int start_b, start_v, end_b, vx, i, ts = BOPT(p->buf, O_TABSIZE);
+    int start_b, start_v, end_b, vx, i, ts = pane_tabsize(p->buf);
     const Line *ln = &p->buf->lines[y];
     if (!BOPT(p->buf, O_SOFTWRAP)) return loc_make(pane_x_from_visual(p, y, rvx), y);
     compute_wrap(p, y);
@@ -239,9 +319,9 @@ Loc pane_row_to_loc(const Pane *p, int y, int row, int rvx) {
     i = start_b;
     while (i < end_b) {
         int cp, n = utf8_decode(ln->s + i, ln->len - i, &cp);
-        int w = char_cols(cp, vx, ts);
-        if (vx + w > start_v + rvx) return loc_make(i, y);
-        vx += w;
+        int nvx = vx_add(vx, char_cols(cp, vx, ts));
+        if (nvx - start_v > rvx) return loc_make(i, y);
+        vx = nvx;
         i += n;
     }
     if (row + 1 < wrap.n && end_b > start_b) return loc_make(utf8_prev(ln->s, end_b), y);
@@ -266,12 +346,19 @@ static SLoc sloc_scroll(const Pane *p, SLoc s, int n) {
         s.row = 0;
         return s;
     }
-    while (n > 0) {
-        int rows = pane_line_rows(p, s.line);
-        if (s.row + 1 < rows) s.row++;
-        else if (s.line + 1 < p->buf->nlines) { s.line++; s.row = 0; }
-        else break;
-        n--;
+    {
+        /* row count of s.line, computed once per line (not once per row:
+           a single huge softwrapped line made this quadratic) */
+        int rows = n > 0 ? pane_line_rows(p, s.line) : 0;
+        while (n > 0) {
+            if (s.row + 1 < rows) s.row++;
+            else if (s.line + 1 < p->buf->nlines) {
+                s.line++;
+                s.row = 0;
+                rows = pane_line_rows(p, s.line);
+            } else break;
+            n--;
+        }
     }
     while (n < 0) {
         if (s.row > 0) s.row--;
@@ -423,10 +510,10 @@ void cur_down(Pane *p, Cursor *c, int n) {
     }
     pane_loc_to_row(p, c->loc, &row, &rvx);
     {
-        int y = c->loc.y, moved = 0;
+        int y = c->loc.y, moved = 0, rows = pane_line_rows(p, y);
         while (n > 0) {
-            if (row + 1 < pane_line_rows(p, y)) row++;
-            else if (y + 1 < b->nlines) { y++; row = 0; }
+            if (row + 1 < rows) row++;
+            else if (y + 1 < b->nlines) { y++; row = 0; rows = pane_line_rows(p, y); }
             else break;
             n--;
             moved = 1;
@@ -439,7 +526,7 @@ void cur_down(Pane *p, Cursor *c, int n) {
 static int tab_movement_width(Pane *p, Cursor *c, int left) {
     /* with tabmovement, move over a whole indent of spaces at once */
     const Line *ln = &p->buf->lines[c->loc.y];
-    int ts = BOPT(p->buf, O_TABSIZE), i, ws = 0;
+    int ts = pane_tabsize(p->buf), i, ws = 0;
     if (!BOPT(p->buf, O_TABMOVEMENT) || !BOPT(p->buf, O_TABSTOSPACES)) return 1;
     while (ws < ln->len && ln->s[ws] == ' ') ws++;
     if (left) {
