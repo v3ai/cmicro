@@ -47,6 +47,8 @@ static Str out;
 static int out_ready;
 static int bce = 1; /* terminal erases with the current background color */
 static unsigned *hash_b, *hash_f; /* per-row hashes for scroll detection */
+static int hash_b_fresh;           /* hash_b computed this frame */
+static int hash_f_valid;           /* hash_f matches front (from last frame's hash_b) */
 static unsigned char *row_chg;     /* per-row "differs from the terminal" */
 int scr_truecolor = 0;
 
@@ -138,8 +140,10 @@ void scr_init(void) {
     if (h < 1) h = 24;
     set_size(w, h);
     term_cursor_visible = -1;
-    /* alternate screen, clear, bracketed paste */
-    emit("\x1b[?1049h\x1b[H\x1b[2J\x1b[?2004h");
+    /* alternate screen, clear, bracketed paste, no autowrap (a character
+       the terminal thinks is wider than we do can then never wrap onto
+       the next line, or scroll the whole screen from the last line) */
+    emit("\x1b[?1049h\x1b[H\x1b[2J\x1b[?2004h\x1b[?7l");
     flush_out();
 }
 
@@ -150,7 +154,7 @@ void scr_set_mouse(int on) {
 }
 
 void scr_fini(void) {
-    emit("\x1b[0m\x1b[r\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?2004l\x1b[?25h\x1b[2J\x1b[?1049l");
+    emit("\x1b[0m\x1b[r\x1b[?7h\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?2004l\x1b[?25h\x1b[2J\x1b[?1049l");
     flush_out();
     term_cursor_visible = 1;
 }
@@ -297,6 +301,23 @@ void scr_fill(int x, int y, int w, int h, int cp, Style st) {
     if (y0 < clip_y0) y0 = clip_y0;
     if (x1 > clip_x1) x1 = clip_x1;
     if (y1 > clip_y1) y1 = clip_y1;
+    if (x0 >= x1) return;
+    if (cp >= 32 && cp < 127) {
+        /* fast path: copy one prepared cell; only wide characters crossing
+           the edges of the span need fixing up */
+        Cell c;
+        memset(&c, 0, sizeof c);
+        c.st = st;
+        c.width = 1;
+        c.g[0] = (char)cp;
+        for (j = y0; j < y1; j++) {
+            Cell *row = &back[j * W];
+            break_wide(row, x0);
+            break_wide(row, x1 - 1);
+            for (i = x0; i < x1; i++) row[i] = c;
+        }
+        return;
+    }
     for (j = y0; j < y1; j++)
         for (i = x0; i < x1; i++) scr_set(i, j, cp, st);
 }
@@ -462,11 +483,13 @@ static void put_cell(Emit *e, const Cell *c, int x, int y) {
     if (c->g[0]) emit(c->g);
     else emit(" ");
     e->cx = x + (c->width == 2 ? 2 : 1);
-    /* after a combining sequence, don't trust the terminal's idea of the
-       width; after the last column the cursor is in the pending-wrap state */
-    if (c->g[0] && c->g[1]) {
+    /* after a combining sequence or a symbol/emoji whose width terminals
+       disagree about, don't trust the terminal's cursor position: the next
+       cell gets an explicit move */
+    if (c->g[1]) {
         int cp, len = (int)strlen(c->g);
-        if (utf8_decode(c->g, len, &cp) < len) e->cx = -1;
+        if (utf8_decode(c->g, len, &cp) < len || cp >= 0x1F000 || (cp >= 0x2190 && cp < 0x2C00))
+            e->cx = -1;
     }
     if (e->cx >= W) e->cx = -1;
 }
@@ -487,16 +510,18 @@ static long cells_differing(const Cell *a, const Cell *b, const Cell *all) {
 }
 
 static unsigned row_hash(const Cell *r) {
-    /* FNV-1a over the row's bytes (32-bit steps) */
+    /* multiplicative hash over the row's bytes, 64 bits at a time (Cell
+       is a multiple of 8 bytes); matches are verified with memcmp */
     const unsigned char *p = (const unsigned char *)r;
     size_t i, n = sizeof *r * (size_t)W;
-    unsigned h = 2166136261u;
-    for (i = 0; i + 4 <= n; i += 4) {
-        unsigned v;
-        memcpy(&v, p + i, 4);
-        h = (h ^ v) * 16777619u;
+    unsigned long long h = 0x9E3779B97F4A7C15ULL;
+    for (i = 0; i + 8 <= n; i += 8) {
+        unsigned long long v;
+        memcpy(&v, p + i, 8);
+        h = (h ^ v) * 0x100000001B3ULL;
+        h ^= h >> 29;
     }
-    return h;
+    return (unsigned)(h ^ (h >> 32));
 }
 
 /* Detect content that moved vertically and let the terminal scroll it.
@@ -512,10 +537,10 @@ static void scroll_optimize(Emit *e) {
         changed += row_chg[y];
     }
     if (changed < 3) return; /* the common case: typing, cursor movement */
-    for (y = 0; y < H; y++) {
-        hash_b[y] = row_hash(&back[y * W]);
-        hash_f[y] = row_hash(&front[y * W]);
-    }
+    for (y = 0; y < H; y++) hash_b[y] = row_hash(&back[y * W]);
+    hash_b_fresh = 1;
+    if (!hash_f_valid)
+        for (y = 0; y < H; y++) hash_f[y] = row_hash(&front[y * W]);
     maxk = H - 2 < 128 ? H - 2 : 128;
     for (k = -maxk; k <= maxk; k++) {
         int n = 0;
@@ -597,6 +622,7 @@ void scr_flush(void) {
     e.have_style = 0;
     e.cur = def_style;
     e.drew = 0;
+    hash_b_fresh = 0;
     if (full_redraw) {
         int i, n = W * H;
         begin_drawing(&e);
@@ -606,6 +632,7 @@ void scr_flush(void) {
         e.cur.fg = e.cur.bg = COLOR_DEFAULT;
         e.cur.attr = 0;
         for (i = 0; i < n; i++) cell_blank(&front[i]);
+        hash_f_valid = 0;
     } else {
         scroll_optimize(&e);
     }
@@ -656,6 +683,14 @@ void scr_flush(void) {
     }
     if (e.drew) emit("\x1b[0m");
     full_redraw = 0;
+    /* front == back now, so this frame's back hashes are next frame's
+       front hashes */
+    if (hash_b_fresh) {
+        unsigned *t = hash_f;
+        hash_f = hash_b;
+        hash_b = t;
+    }
+    hash_f_valid = hash_b_fresh;
     if (cursor_x >= 0 && cursor_y >= 0 && cursor_x < W && cursor_y < H) {
         static int last_x = -1, last_y = -1;
         if (e.drew || cursor_x != last_x || cursor_y != last_y || term_cursor_visible != 1) {
