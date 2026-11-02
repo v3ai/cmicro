@@ -11,15 +11,16 @@ import sys
 
 ATOMS = ['a', 'b', 'c', 'x', 'A', 'B', '.', '\\.', '\\w', '\\W', '\\d', '\\D', '\\s', '\\S',
          '[abc]', '[^ab]', '[a-c]', '[[:alpha:]]', '[[:^digit:]]', '[\\d\\s]', '[^\\n]',
-         '\\b', '\\B', '^', '$', '\\A', '\\z', 'é', 'ü', '日', '\\x41', '\\x{e9}', '\\pL',
+         '\\b', '\\B', '^', '$', '\\A', '\\z', 'é', 'ü', '日', '\\x41', '\\x{e9}',
          '[é-ü]', '\\n', ' ', '-', '_', '1', '\\*', '\\Qa.b\\E', '[]a]', '[^]a]', '[a-]',
-         '(?i:ab)', '(?s:.)', '(?m:^)', '(?m:$)', '(?U:a*)', '[\\pN]', 'Σ', 'σ', 'k', 'K', 's',
+         '(?i:ab)', '(?s:.)', '(?m:^)', '(?m:$)', '(?U:a*)', 'Σ', 'σ', 'k', 'K', 's',
          'ß', 'Å', '\u212a', 'ſ', '[k-s]', '[^k]', '(?i:[^k])', '[\\W]', '(?i:\\W)', '(?i:[^\\w])',
          '[A-Za-z]', '[^\\x00-\\x{10FFFF}]', '[\\x00-\\x{10FFFF}]', '[[:^alpha:]]',
          '\\x{FFFD}', '\\x{80}', '\\0', '\\012']
 # (?i) is only used for a whole group: Go's alternation factoring mixes up
 # case-sensitive and -insensitive prefixes ("K.|(?i)k." is parsed as "K(?:.|.)").
-# \pL, \p{Greek} etc. are approximations, so only used where they are exact.
+# \pL, \p{Greek} etc. are approximations, so they are left out here (the
+# syntax-file patterns still test them on real text).
 # syntax errors and other edge cases (each also checked against Go)
 ODD = ['(?', ')', '(', '[', '{', '{2}', '{,3}', '{01}', '\\', '(?-i)', '(?i-s:a)', '(?-)', '(?i-)',
        '(?--i)', '(?P<', '(?P<x>a)', '(?P<>a)', '(?<y>b)', '(?P=x)', '\\1', '\\12', '\\8',
