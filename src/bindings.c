@@ -3,6 +3,7 @@
  */
 #include "micro.h"
 #include "conf.h"
+#include "platform.h"
 #include "runtime.h"
 
 #include <stdlib.h>
@@ -166,6 +167,8 @@ void bindings_load_user(void) {
     int i;
     if (!path) return;
     text = read_file(path, NULL);
+    if (!text && plat_exists(path))
+        editor_set_error("Error reading bindings.json: cannot read the file");
     free(path);
     if (!text) return;
     root = json_parse(text, &err);
@@ -208,6 +211,12 @@ static int save_binding(const char *keyname, const char *action) {
             free(path);
             return -1;
         }
+    } else if (plat_exists(path)) {
+        /* there but unreadable (permissions, I/O error, too large):
+           rewriting it from an empty map would drop the user's bindings */
+        editor_set_error("Not saving the binding: cannot read bindings.json");
+        free(path);
+        return -1;
     }
     if (!root || root->type != CN_MAP) {
         cnode_free(root);
