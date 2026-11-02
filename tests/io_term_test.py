@@ -13,17 +13,22 @@ def check(cond, what):
         fails += 1
         print("FAIL:", what)
 
-def wait_exit(t, secs=3.0):
+def wait_status(t, secs=3.0):
+    """the wait status once the editor exits, or None"""
     end = time.time() + secs
     while time.time() < end:
         try:
             pid, st = os.waitpid(t.pid, os.WNOHANG)
         except ChildProcessError:
-            return True
+            return -1
         if pid:
-            return True
+            t.pump(0.1)
+            return st
         t.pump(0.05)
-    return False
+    return None
+
+def wait_exit(t, secs=3.0):
+    return wait_status(t, secs) is not None
 
 with tempfile.TemporaryDirectory() as d:
     env = {"HOME": d, "XDG_CONFIG_HOME": "", "MICRO_CONFIG_HOME": ""}
@@ -53,7 +58,12 @@ with tempfile.TemporaryDirectory() as d:
     t = Term([MICRO, f], env=env)
     t.send(b"XYZ")
     os.kill(t.pid, signal.SIGTERM)
-    check(wait_exit(t), "exit on SIGTERM")
+    st = wait_status(t)
+    check(st is not None, "exit on SIGTERM")
+    # after saving backups it dies of the signal, so shells and
+    # supervisors (and act_fuzz.py) see a SIGTERM, not exit status 1
+    check(st is not None and st != -1 and os.WIFSIGNALED(st) and os.WTERMSIG(st) == signal.SIGTERM,
+          "killed by SIGTERM, status %r" % st)
     bdir = os.path.join(d, ".config", "micro", "backups")
     names = os.listdir(bdir) if os.path.isdir(bdir) else []
     check(len(names) == 1, "one backup after SIGTERM: %r" % names)
@@ -65,6 +75,34 @@ with tempfile.TemporaryDirectory() as d:
     check(t.raw.rstrip().endswith(b"\x1b[?1049l"), "terminal restored on SIGTERM")
     t.close()
     check(open(f).read() == "one\ntwo\nthree\n", "file untouched by SIGTERM")
+
+    # a crash restores the terminal like a normal exit, autowrap included
+    h = os.path.join(d, "h.txt") # f has a backup now: no recovery prompt
+    open(h, "w").write("x\n")
+    t = Term([MICRO, h], env=env)
+    t.pump(0.3)
+    check(t.alive() and "x" in t.line(0), "editor up before the crash")
+    n = len(t.raw)
+    os.kill(t.pid, signal.SIGSEGV)
+    t.pump(0.5) # read the output before reaping: the pty may drop it after
+    st = wait_status(t)
+    check(st is not None and st != -1 and os.WIFSIGNALED(st) and os.WTERMSIG(st) == signal.SIGSEGV,
+          "dies of SIGSEGV, status %r" % st)
+    tail = t.raw[n:]
+    check(b"\x1b[?7h" in tail and b"\x1b[r" in tail and tail.rstrip().endswith(b"\x1b[?1049l"),
+          "crash reset sequence %r" % tail)
+    t.close()
+
+    # file names in messages printed outside the editor: control bytes,
+    # C1 and invalid UTF-8 (raw 0x9B is CSI on 8-bit terminals) become '?'
+    evil = os.path.join(d.encode(), b"d\xc3\xa9\x9b2J\x9d0;x\x9c\x07\xc2\x9b\xef\xbf\xbd")
+    os.mkdir(evil)
+    t = Term([MICRO.encode(), evil], env=env)
+    t.pump(0.3)
+    i = t.raw.find(b"micro: ")
+    msg = t.raw[i:t.raw.find(b"\n", i)] if i >= 0 else b""
+    check(b"d\xc3\xa9?2J?0;x???\xef\xbf\xbd is a directory" in msg, "sanitized error message %r" % msg)
+    t.close()
 
     # the terminal going away (pty closed, no SIGHUP): exit, don't spin
     g = os.path.join(d, "g.txt")

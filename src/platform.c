@@ -50,7 +50,9 @@ static void on_term(int sig) { term_signal = sig; }
 /* A fatal signal (crash): put the terminal back the way we found it, then
    die of the same signal.  Only async-signal-safe calls in here. */
 static void on_fatal(int sig) {
-    static const char reset[] = "\x1b[0m\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?2004l\x1b[?25h\x1b[?1049l";
+    /* what scr_fini sends, including autowrap back on (scr_init turns it
+       off) and no scroll region; keep the two in step */
+    static const char reset[] = "\x1b[0m\x1b[r\x1b[?7h\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?2004l\x1b[?25h\x1b[?1049l";
     if (raw_on) {
         ssize_t w = write(STDOUT_FILENO, reset, sizeof reset - 1);
         (void)w;
