@@ -485,7 +485,7 @@ static Regex *compile_search(Buffer *b, const char *pat, int literal, char **err
 static int replace_all(Pane *p, const char *search, const char *repl, int literal, Loc a, Loc z) {
     Buffer *b = p->buf;
     char *err = NULL;
-    Regex *re = compile_search(b, search, literal, &err);
+    Regex *re = compile_search(b, search, literal, &err), *pad = NULL;
     int y, count = 0, ncap;
     int *caps;
     Str out;
@@ -496,7 +496,7 @@ static int replace_all(Pane *p, const char *search, const char *repl, int litera
     }
     ncap = re_ncaps(re);
     if (ncap < 1) ncap = 1;
-    caps = xmalloc(sizeof(int) * (size_t)(2 * ncap));
+    caps = xmalloc(sizeof(int) * (size_t)(2 * (ncap + 1))); /* + the padding group below */
     a = buf_clamp(b, a);
     z = buf_clamp(b, z);
     if (loc_cmp(a, z) > 0) { Loc t = a; a = z; z = t; }
@@ -506,10 +506,31 @@ static int replace_all(Pane *p, const char *search, const char *repl, int litera
         int from = y == a.y ? a.x : 0;
         int to = y == z.y ? z.x : ln->len;
         int pos = from, first = -1, last = from;
+        Regex *lre = re;
+        int slen = to, scap = ncap;
+        if (to < ln->len) {
+            /* the range ends inside the line: like micro, search the range
+               plus the next character as "(?:search)(.)", so `$` doesn't
+               match at the range end and \b sees the real next character;
+               the match ends where the padding group starts */
+            if (!pad) {
+                char *q = literal ? re_quote(search) : NULL;
+                char *pp = xsprintf("(?:%s)((?s:.))", q ? q : search);
+                pad = re_compile(pp, BOPT(b, O_IGNORECASE) ? RE_ICASE : 0, NULL);
+                free(pp);
+                free(q);
+            }
+            if (pad && re_ncaps(pad) == ncap + 1) {
+                lre = pad;
+                slen = utf8_next(ln->s, ln->len, to);
+                scap = ncap + 1;
+            }
+        }
         str_clear(&out);
-        while (pos <= to && re_search(re, ln->s, to, pos, caps, ncap)) {
+        while (pos <= to && re_search(lre, ln->s, slen, pos, caps, scap)) {
             char *r;
             int rl;
+            if (lre == pad) caps[1] = caps[2 * ncap];
             if (caps[0] < pos || caps[1] < caps[0] || caps[1] > to) break; /* defensive */
             if (caps[0] == caps[1] && first >= 0 && caps[0] == last) {
                 /* like Go's ReplaceAll: an empty match right after a match is skipped */
@@ -547,6 +568,7 @@ static int replace_all(Pane *p, const char *search, const char *repl, int litera
     str_free(&out);
     free(caps);
     re_free(re);
+    re_free(pad);
     return count;
 }
 
