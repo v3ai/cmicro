@@ -146,20 +146,23 @@ Pane **tab_panes(Tab *t, int *n) {
     return arr;
 }
 
-int tab_npanes(Tab *t) {
-    int n;
-    Pane **a = tab_panes(t, &n);
-    free(a);
-    return n;
+static int count_leaves(const Node *n) {
+    if (!n) return 0;
+    if (n->kind == NODE_LEAF) return 1;
+    return count_leaves(n->a) + count_leaves(n->b);
 }
 
-Pane *tab_pane_at(Tab *t, int x, int y) {
-    int n, i;
-    Pane **a = tab_panes(t, &n), *r = NULL;
-    for (i = 0; i < n; i++) {
-        Pane *p = a[i];
-        if (x >= p->x && x < p->x + p->w && y >= p->y && y < p->y + p->h) { r = p; break; }
+int tab_npanes(Tab *t) { return count_leaves(t->root); }
+
+static Pane *pane_at(Node *n, int x, int y) {
+    Pane *r;
+    if (!n) return NULL;
+    if (n->kind == NODE_LEAF) {
+        Pane *p = n->pane;
+        return x >= p->x && x < p->x + p->w && y >= p->y && y < p->y + p->h ? p : NULL;
     }
-    free(a);
-    return r;
+    if ((r = pane_at(n->a, x, y))) return r;
+    return pane_at(n->b, x, y);
 }
+
+Pane *tab_pane_at(Tab *t, int x, int y) { return t ? pane_at(t->root, x, y) : NULL; }

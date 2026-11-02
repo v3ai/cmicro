@@ -35,6 +35,9 @@ static void set_key(InEvent *ev, int key, int mods, int nbytes) {
     ev->raw[ev->rawlen] = 0;
 }
 
+/* largest mouse coordinate we report (terminal sizes are 16-bit) */
+#define MOUSE_MAX 65535
+
 static int csi_mods(int p) { return p > 1 ? ((p - 1) & 7) : 0; }
 
 /* parse a CSI sequence starting at inbuf[0]="\x1b[" ; returns bytes consumed, 0 if incomplete */
@@ -49,7 +52,7 @@ static int parse_csi(InEvent *ev) {
         b = inbuf[3] - 32;
         btn = b & 3;
         ev->type = IN_MOUSE;
-        ev->mx = inbuf[4] - 33;
+        ev->mx = inbuf[4] - 33; /* 0..222 */
         ev->my = inbuf[5] - 33;
         ev->mods = ((b & 4) ? MOD_SHIFT : 0) | ((b & 8) ? MOD_ALT : 0) | ((b & 16) ? MOD_CTRL : 0);
         if (ev->mx < 0) ev->mx = 0;
@@ -74,15 +77,16 @@ static int parse_csi(InEvent *ev) {
             if (priv == '<' && (c == 'M' || c == 'm') && np >= 3) {
                 int b = params[0], btn = b & 3;
                 ev->type = IN_MOUSE;
-                ev->mx = params[1] - 1;
-                ev->my = params[2] - 1;
+                /* params are capped below 10^8; clamp to a sane screen range */
+                ev->mx = clampi(params[1] - 1, 0, MOUSE_MAX);
+                ev->my = clampi(params[2] - 1, 0, MOUSE_MAX);
                 ev->mods = ((b & 4) ? MOD_SHIFT : 0) | ((b & 8) ? MOD_ALT : 0) | ((b & 16) ? MOD_CTRL : 0);
                 if (b & 64) {
                     ev->key = KEY_WHEEL_UP + btn;
                 } else if (c == 'm') {
                     ev->key = btn == 1 ? KEY_MOUSE_MIDDLE_RELEASE : btn == 2 ? KEY_MOUSE_RIGHT_RELEASE : KEY_MOUSE_LEFT_RELEASE;
                 } else if (b & 32) {
-                    if (btn == 3) return n; /* plain motion: ignore */
+                    if (btn == 3) { ev->type = IN_NONE; return n; } /* plain motion: ignore */
                     ev->key = btn == 1 ? KEY_MOUSE_MIDDLE_DRAG : btn == 2 ? KEY_MOUSE_RIGHT_DRAG : KEY_MOUSE_LEFT_DRAG;
                 } else {
                     ev->key = btn == 1 ? KEY_MOUSE_MIDDLE : btn == 2 ? KEY_MOUSE_RIGHT : KEY_MOUSE_LEFT;
@@ -171,6 +175,7 @@ static int parse_plain(InEvent *ev, int off, int alt) {
             int need = (c & 0xF0) == 0xF0 ? 4 : (c & 0xE0) == 0xE0 ? 3 : 2;
             if (inlen - off < need) return 0;
         }
+        if (cp >= 0xD800 && cp <= 0xDFFF) cp = 0xFFFD; /* encoded surrogate: invalid */
         set_key(ev, cp, mods, off + n);
         return off + n;
     }
@@ -223,7 +228,8 @@ done:
     return 1;
 }
 
-int input_poll(InEvent *ev, int timeout_ms) {
+/* decode one event; *ev may come back as IN_NONE for ignored sequences */
+static int poll_once(InEvent *ev, int timeout_ms) {
     int n;
     memset(ev, 0, sizeof *ev);
     if (plat_resized()) {
@@ -254,7 +260,7 @@ int input_poll(InEvent *ev, int timeout_ms) {
                 }
                 if (n < 0) return read_paste(ev, -n);
                 consume(n);
-                return ev->type != IN_NONE ? 1 : input_poll(ev, 0);
+                return 1; /* possibly IN_NONE: input_poll() skips it */
             }
             if (inbuf[1] == 'O') {
                 int key = 0;
@@ -300,6 +306,19 @@ int input_poll(InEvent *ev, int timeout_ms) {
         consume(n);
         return 1;
     }
+}
+
+int input_poll(InEvent *ev, int timeout_ms) {
+    /* skip ignored sequences iteratively (a flood of them used to recurse
+       once per sequence and could overflow the stack); after many in a row
+       hand back an IN_NONE event so the caller gets to redraw */
+    int i;
+    for (i = 0; i < 1024; i++) {
+        int r = poll_once(ev, i ? 0 : timeout_ms);
+        if (r <= 0) return r;
+        if (ev->type != IN_NONE) return 1;
+    }
+    return 1;
 }
 
 void input_free(InEvent *ev) {
@@ -377,11 +396,11 @@ int key_parse(const char *name, int *key, int *mods) {
 char *key_name(int key, int mods) {
     Str s;
     size_t i;
+    if (key == ' ' && (mods & MOD_CTRL) && !(mods & ~MOD_CTRL)) return xstrdup("CtrlSpace");
     str_init(&s);
     str_reserve(&s, 0);
     if (key < KEY_SPECIAL) {
         char buf[8];
-        if (key == ' ' && (mods & MOD_CTRL) && !(mods & ~MOD_CTRL)) return xstrdup("CtrlSpace");
         if (mods & MOD_CTRL) str_puts(&s, "Ctrl");
         if (mods & MOD_ALT) str_puts(&s, "Alt");
         if (mods & MOD_SHIFT) str_puts(&s, "Shift");
