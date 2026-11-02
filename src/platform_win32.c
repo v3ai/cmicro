@@ -418,6 +418,28 @@ static DWORD attrs(const char *path) {
     return a;
 }
 
+/* is `w` itself a symbolic link or junction?  Other reparse points
+   (OneDrive placeholders, dedup, cloud files) are ordinary files. */
+static int is_wlink(const wchar_t *w) {
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    DWORD a = GetFileAttributesW(w);
+    if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_REPARSE_POINT)) return 0;
+    h = FindFirstFileW(w, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 1; /* can't tell: treat as a link */
+    FindClose(h);
+    return fd.dwReserved0 == IO_REPARSE_TAG_SYMLINK || fd.dwReserved0 == IO_REPARSE_TAG_MOUNT_POINT;
+}
+
+/* does the volume holding `w` keep no ACLs (FAT, exFAT)? */
+static int no_acl_volume(const wchar_t *w) {
+    wchar_t root[MAX_PATH + 1];
+    DWORD flags = 0;
+    if (!GetVolumePathNameW(w, root, MAX_PATH + 1)) return 0;
+    if (!GetVolumeInformationW(root, NULL, 0, NULL, NULL, &flags, NULL, 0)) return 0;
+    return !(flags & FILE_PERSISTENT_ACLS);
+}
+
 int plat_is_dir(const char *path) {
     DWORD a = attrs(path);
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
@@ -838,20 +860,20 @@ PlatSave *plat_save_open(const char *path, long long size, int flags, int *denie
         HANDLE q = CreateFileW(s->wdest, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
         if (q == INVALID_HANDLE_VALUE) {
-            inplace = 1; /* e.g. a dangling link: write through it */
+            if (is_wlink(s->wdest)) inplace = 1; /* a dangling link: write through it */
         } else {
             BY_HANDLE_FILE_INFORMATION fi;
             wchar_t *real = final_path(q);
             if (GetFileInformationByHandle(q, &fi)) {
                 a = fi.dwFileAttributes;
-                if (fi.nNumberOfLinks != 1) inplace = 1;
+                if (fi.nNumberOfLinks > 1) inplace = 1;
             } else {
                 inplace = 1;
             }
             if (real) {
                 free(s->wdest);
                 s->wdest = real;
-            } else if (la & FILE_ATTRIBUTE_REPARSE_POINT) {
+            } else if (is_wlink(s->wdest)) {
                 inplace = 1;
             }
             CloseHandle(q);
@@ -882,7 +904,7 @@ PlatSave *plat_save_open(const char *path, long long size, int flags, int *denie
     }
     if (s->h == INVALID_HANDLE_VALUE) {
         /* a private file's link is replaced, never written through */
-        if (s->priv && la != INVALID_FILE_ATTRIBUTES && (la & FILE_ATTRIBUTE_REPARSE_POINT)) {
+        if (s->priv && la != INVALID_FILE_ATTRIBUTES && is_wlink(s->wdest)) {
             set_win_err(path, ERROR_ACCESS_DENIED);
             save_free(s);
             return NULL;
@@ -959,7 +981,7 @@ static int swap_in(PlatSave *s) {
            name is replaced rather than followed */
         if (MoveFileExW(s->wtmp, s->wdest, MOVEFILE_REPLACE_EXISTING)) return 0;
         e = GetLastError();
-        if (da == INVALID_FILE_ATTRIBUTES || (da & FILE_ATTRIBUTE_REPARSE_POINT)) goto failed;
+        if (da == INVALID_FILE_ATTRIBUTES || is_wlink(s->wdest)) goto failed;
     } else {
         /* keeps the target's attributes, ACL, streams and file ID */
         if (ReplaceFileW(s->wdest, s->wtmp, NULL, REPLACEFILE_IGNORE_MERGE_ERRORS, NULL, NULL)) return 0;
@@ -1073,15 +1095,22 @@ int plat_owns_file(const char *path) {
     PSECURITY_DESCRIPTOR sd = NULL;
     HANDLE tok;
     int ok = 0;
-    if (a == INVALID_FILE_ATTRIBUTES ||
-        (a & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DEVICE)))
+    if (a == INVALID_FILE_ATTRIBUTES || (a & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_DEVICE)))
         return 0;
     wp = to_w(path);
     if (!wp) return 0;
+    if (is_wlink(wp)) {
+        free(wp);
+        return 0;
+    }
     if (GetNamedSecurityInfoW(wp, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, &owner, NULL, NULL, NULL, &sd) !=
-            ERROR_SUCCESS ||
-        !owner) {
-        ok = 1; /* a file system without owners (FAT) */
+        ERROR_SUCCESS) {
+        /* the owner can always read a file's owner, so a failure (e.g.
+           access denied) means it isn't ours - unless the volume keeps
+           no owners at all */
+        ok = no_acl_volume(wp);
+    } else if (!owner) {
+        ok = no_acl_volume(wp);
     } else if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) {
         TOKEN_USER *u = token_sid(tok, TokenUser);
         TOKEN_OWNER *o = token_sid(tok, TokenOwner);
