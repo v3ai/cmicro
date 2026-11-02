@@ -79,7 +79,11 @@ char *plat_clipboard_get(int *len);     /* malloc'd, NULL if unavailable */
    With PLAT_SAVE_PRIVATE (backups, cursor positions) a new file gets mode
    0600 and a symlink at `path` is replaced, never followed.
    On failure it returns NULL and sets *denied when permission was the
-   problem (the caller may then offer `sudo`). */
+   problem (the caller may then offer `sudo`).
+   The temporary file is used only when the file is writable by its owner
+   and has no extended attributes (ACLs, security labels); if the final
+   rename fails (EBUSY on a bind-mounted file, EXDEV), the data is copied
+   over the file in place instead. */
 #define PLAT_SAVE_PRIVATE 1
 typedef struct PlatSave PlatSave;
 PlatSave   *plat_save_open(const char *path, long long size, int flags, int *denied);
