@@ -1,12 +1,15 @@
 /* syntax_bench - highlight files through the editor's syntax.c code path.
  *
- *   syntax_bench [-n iters] [-d] [-f filetype] file...
+ *   syntax_bench [-n iters] [-d] [-f filetype] [-c configdir] file...
  *
  * For each file: detect the syntax (or use -f), then highlight every line
  * the way buffer.c does (state carried from line to line, one group id per
  * byte).  -d dumps the per-byte group names as runs plus the end-of-line
- * region, so output can be diffed between versions.  Prints timings for
- * syntax_init() and for highlighting to stderr. */
+ * region, so output can be diffed between versions, and checks that the
+ * states-only pass (hl == NULL, used for lines above the view) ends every
+ * line in the same region.  -c loads user syntax files from
+ * configdir/syntax as the editor does.  Prints timings for syntax_init()
+ * and for highlighting to stderr. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,6 +40,7 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[a], "-n") && a + 1 < argc) iters = atoi(argv[++a]);
         else if (!strcmp(argv[a], "-d")) dump = 1;
         else if (!strcmp(argv[a], "-f") && a + 1 < argc) ft = argv[++a];
+        else if (!strcmp(argv[a], "-c") && a + 1 < argc) config_dir = xstrdup(argv[++a]);
     }
     colorscheme_load("default", NULL);
     t0 = now();
@@ -84,7 +88,7 @@ int main(int argc, char **argv) {
                 syn->filetype, (t1 - t0) * 1e3, n, flen);
         hl = xmalloc(sizeof *hl * (size_t)(maxlen + 1));
         for (it = 0; it < iters; it++) {
-            Region *st = NULL;
+            Region *st = NULL, *st2 = NULL;
             Str o;
             str_init(&o);
             t0 = now();
@@ -93,6 +97,13 @@ int main(int argc, char **argv) {
                 char save = lines[i][lens[i]];
                 lines[i][lens[i]] = 0;
                 st = syntax_highlight_line(syn, st, lines[i], lens[i], hl);
+                if (dump && it == 0) {
+                    st2 = syntax_highlight_line(syn, st2, lines[i], lens[i], NULL);
+                    if (st2 != st) {
+                        fprintf(stderr, "%s:%d: states-only pass ends in a different region\n", argv[a], i + 1);
+                        exit(1);
+                    }
+                }
                 lines[i][lens[i]] = save;
                 if (dump && it == 0) {
                     int k = 0;
