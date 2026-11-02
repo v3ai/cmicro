@@ -20,6 +20,9 @@ typedef struct CNode {
 } CNode;
 
 CNode *yaml_parse(const char *text, char **err);
+/* like yaml_parse, but the value of the root-level key `skip_key` is only
+   scanned, not built (it becomes CN_NULL); everything else is identical */
+CNode *yaml_parse_skip(const char *text, const char *skip_key, char **err);
 CNode *json_parse(const char *text, char **err);
 void   cnode_free(CNode *n);
 CNode *cnode_get(const CNode *map, const char *key);

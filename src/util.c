@@ -2,26 +2,32 @@
 #include "platform.h"
 
 #include <ctype.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+static void oom(void) {
+    fputs("micro: out of memory\n", stderr);
+    exit(1);
+}
+
 void *xmalloc(size_t n) {
     void *p = malloc(n ? n : 1);
-    if (!p) { fputs("micro: out of memory\n", stderr); exit(1); }
+    if (!p) oom();
     return p;
 }
 
 void *xcalloc(size_t n, size_t m) {
     void *p = calloc(n ? n : 1, m ? m : 1);
-    if (!p) { fputs("micro: out of memory\n", stderr); exit(1); }
+    if (!p) oom();
     return p;
 }
 
 void *xrealloc(void *p, size_t n) {
     p = realloc(p, n ? n : 1);
-    if (!p) { fputs("micro: out of memory\n", stderr); exit(1); }
+    if (!p) oom();
     return p;
 }
 
@@ -46,9 +52,10 @@ char *xsprintf(const char *fmt, ...) {
     va_start(ap, fmt);
     n = vsnprintf(NULL, 0, fmt, ap);
     va_end(ap);
+    if (n < 0) return xstrdup(""); /* encoding error */
     r = xmalloc((size_t)n + 1);
     va_start(ap, fmt);
-    vsnprintf(r, (size_t)n + 1, fmt, ap);
+    if (vsnprintf(r, (size_t)n + 1, fmt, ap) < 0) r[0] = 0;
     va_end(ap);
     return r;
 }
@@ -60,9 +67,10 @@ void str_free(Str *s) { free(s->s); str_init(s); }
 void str_clear(Str *s) { s->len = 0; if (s->s) s->s[0] = 0; }
 
 void str_reserve(Str *s, int n) {
+    if (n < 0 || n >= INT_MAX) oom(); /* a length overflowed int */
     if (n + 1 > s->cap) {
         int c = s->cap ? s->cap : 16;
-        while (c < n + 1) c *= 2;
+        while (c < n + 1) c = c > INT_MAX / 2 ? n + 1 : c * 2;
         s->s = xrealloc(s->s, (size_t)c);
         s->cap = c;
         s->s[s->len] = 0; /* always NUL-terminated, even when empty */
@@ -71,14 +79,27 @@ void str_reserve(Str *s, int n) {
 
 void str_putn(Str *s, const char *p, int n) {
     if (n <= 0) { str_reserve(s, s->len); s->s[s->len] = 0; return; }
+    if (n > INT_MAX - 1 - s->len) oom();
     str_reserve(s, s->len + n);
     memcpy(s->s + s->len, p, (size_t)n);
     s->len += n;
     s->s[s->len] = 0;
 }
 
-void str_puts(Str *s, const char *p) { str_putn(s, p, (int)strlen(p)); }
-void str_putc(Str *s, char c) { str_putn(s, &c, 1); }
+void str_puts(Str *s, const char *p) {
+    size_t n = strlen(p);
+    if (n > (size_t)INT_MAX) oom();
+    str_putn(s, p, (int)n);
+}
+
+void str_putc(Str *s, char c) {
+    if (s->len + 1 < s->cap) { /* fast path: room for c and the NUL */
+        s->s[s->len++] = c;
+        s->s[s->len] = 0;
+        return;
+    }
+    str_putn(s, &c, 1);
+}
 
 void str_printf(Str *s, const char *fmt, ...) {
     va_list ap;
@@ -86,26 +107,35 @@ void str_printf(Str *s, const char *fmt, ...) {
     va_start(ap, fmt);
     n = vsnprintf(NULL, 0, fmt, ap);
     va_end(ap);
+    if (n < 0) { str_reserve(s, s->len); return; } /* encoding error */
+    if (n > INT_MAX - 1 - s->len) oom();
     str_reserve(s, s->len + n);
     va_start(ap, fmt);
-    vsnprintf(s->s + s->len, (size_t)n + 1, fmt, ap);
+    if (vsnprintf(s->s + s->len, (size_t)n + 1, fmt, ap) < 0) n = 0;
     va_end(ap);
     s->len += n;
+    s->s[s->len] = 0;
 }
 
 void str_insert(Str *s, int at, const char *p, int n) {
+    char *tmp = NULL;
+    if (n <= 0) return;
+    if (n > INT_MAX - 1 - s->len) oom();
     if (at < 0) at = 0;
     if (at > s->len) at = s->len;
+    /* p may point into s itself, which the realloc/memmove would clobber */
+    if (s->s && p >= s->s && p < s->s + s->cap) p = tmp = xstrndup(p, (size_t)n);
     str_reserve(s, s->len + n);
     memmove(s->s + at + n, s->s + at, (size_t)(s->len - at));
     memcpy(s->s + at, p, (size_t)n);
     s->len += n;
     s->s[s->len] = 0;
+    free(tmp);
 }
 
 void str_delete(Str *s, int at, int n) {
     if (at < 0 || at >= s->len || n <= 0) return;
-    if (at + n > s->len) n = s->len - at;
+    if (n > s->len - at) n = s->len - at;
     memmove(s->s + at, s->s + at + n, (size_t)(s->len - at - n));
     s->len -= n;
     s->s[s->len] = 0;
@@ -119,28 +149,39 @@ char *str_detach(Str *s) {
 
 /* ---------- UTF-8 ---------- */
 
+/* Decoding follows Go's unicode/utf8 (which micro uses): overlong forms,
+   surrogates (U+D800..U+DFFF), values above U+10FFFF and truncated
+   sequences are invalid and decode as U+FFFD consuming one byte.  Never
+   reads s[len] or beyond. */
 int utf8_decode(const char *str, int len, int *cp) {
     const unsigned char *s = (const unsigned char *)str;
+    int c;
     if (len <= 0) { *cp = 0; return 0; }
     if (s[0] < 0x80) { *cp = s[0]; return 1; }
-    if ((s[0] & 0xE0) == 0xC0 && len >= 2 && (s[1] & 0xC0) == 0x80) {
-        *cp = ((s[0] & 0x1F) << 6) | (s[1] & 0x3F);
-        if (*cp >= 0x80) return 2;
-    } else if ((s[0] & 0xF0) == 0xE0 && len >= 3 && (s[1] & 0xC0) == 0x80 &&
-               (s[2] & 0xC0) == 0x80) {
-        *cp = ((s[0] & 0x0F) << 12) | ((s[1] & 0x3F) << 6) | (s[2] & 0x3F);
-        if (*cp >= 0x800) return 3;
-    } else if ((s[0] & 0xF8) == 0xF0 && len >= 4 && (s[1] & 0xC0) == 0x80 &&
-               (s[2] & 0xC0) == 0x80 && (s[3] & 0xC0) == 0x80) {
-        *cp = ((s[0] & 0x07) << 18) | ((s[1] & 0x3F) << 12) | ((s[2] & 0x3F) << 6) |
-              (s[3] & 0x3F);
-        if (*cp >= 0x10000 && *cp <= 0x10FFFF) return 4;
+    if ((s[0] & 0xE0) == 0xC0) {
+        if (len >= 2 && (s[1] & 0xC0) == 0x80) {
+            c = ((s[0] & 0x1F) << 6) | (s[1] & 0x3F);
+            if (c >= 0x80) { *cp = c; return 2; }
+        }
+    } else if ((s[0] & 0xF0) == 0xE0) {
+        if (len >= 3 && (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80) {
+            c = ((s[0] & 0x0F) << 12) | ((s[1] & 0x3F) << 6) | (s[2] & 0x3F);
+            if (c >= 0x800 && (c < 0xD800 || c > 0xDFFF)) { *cp = c; return 3; }
+        }
+    } else if ((s[0] & 0xF8) == 0xF0) {
+        if (len >= 4 && (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80 && (s[3] & 0xC0) == 0x80) {
+            c = ((s[0] & 0x07) << 18) | ((s[1] & 0x3F) << 12) | ((s[2] & 0x3F) << 6) | (s[3] & 0x3F);
+            if (c >= 0x10000 && c <= 0x10FFFF) { *cp = c; return 4; }
+        }
     }
     *cp = 0xFFFD; /* invalid byte: treat as one replacement char */
     return 1;
 }
 
+/* Writes at most 4 bytes.  Values outside 0..0x10FFFF (e.g. from a
+   \U escape) are written as U+FFFD. */
 int utf8_encode(int cp, char *out) {
+    if (cp < 0 || cp > 0x10FFFF) cp = 0xFFFD;
     if (cp < 0x80) { out[0] = (char)cp; return 1; }
     if (cp < 0x800) {
         out[0] = (char)(0xC0 | (cp >> 6));
@@ -163,12 +204,15 @@ int utf8_encode(int cp, char *out) {
 int utf8_next(const char *s, int len, int i) {
     int cp;
     if (i >= len) return len;
+    if (i < 0) return 0;
+    if ((unsigned char)s[i] < 0x80) return i + 1; /* ASCII fast path */
     return i + utf8_decode(s + i, len - i, &cp);
 }
 
 int utf8_prev(const char *s, int i) {
     int j, cp, n;
     if (i <= 0) return 0;
+    if ((unsigned char)s[i - 1] < 0x80) return i - 1; /* ASCII fast path */
     /* walk back over continuation bytes, but verify the sequence decodes */
     for (j = i - 1; j > 0 && j > i - 4 && (((unsigned char)s[j]) & 0xC0) == 0x80; j--)
         ;
@@ -179,7 +223,11 @@ int utf8_prev(const char *s, int i) {
 
 int utf8_count(const char *s, int len) {
     int i = 0, n = 0;
-    while (i < len) { i = utf8_next(s, len, i); n++; }
+    while (i < len) {
+        if ((unsigned char)s[i] < 0x80) i++;
+        else i = utf8_next(s, len, i);
+        n++;
+    }
     return n;
 }
 
@@ -243,6 +291,7 @@ int char_width(int cp) {
 }
 
 int is_word_char(int cp) {
+    if (cp < 0) return 0;
     if (cp < 128) return isalnum(cp) || cp == '_';
     /* treat all non-ASCII letters/symbols (except common punctuation/space) as word chars */
     if (cp == 0xA0 || (cp >= 0x2000 && cp <= 0x206F) || cp == 0x3000) return 0;
@@ -309,62 +358,124 @@ char *expand_home(const char *p) {
     return r;
 }
 
+/* Reads the whole file into one NUL-terminated buffer.  Files that don't
+   fit an int length (the Str limit, ~2 GB) fail like unreadable ones. */
 char *read_file(const char *path, long *len) {
     FILE *f = plat_fopen(path, "rb");
     Str s;
-    char buf[65536];
+    long size = -1;
     size_t n;
     if (!f) return NULL;
     str_init(&s);
-    str_reserve(&s, 0);
-    while ((n = fread(buf, 1, sizeof buf, f)) > 0) str_putn(&s, buf, (int)n);
+    /* size hint for regular files, so the data is read in place once */
+    if (fseek(f, 0, SEEK_END) == 0) size = ftell(f);
+    if (fseek(f, 0, SEEK_SET) != 0) size = -1;
+    clearerr(f);
+    if (size > (long)(INT_MAX - 2)) { fclose(f); return NULL; }
+    str_reserve(&s, size > 0 ? (int)size + 1 : 4096);
+    for (;;) {
+        size_t room = (size_t)(s.cap - s.len - 1);
+        if (room == 0) {
+            int want;
+            if (s.len >= INT_MAX - 2) { fclose(f); str_free(&s); return NULL; }
+            want = s.len > INT_MAX / 2 - 1 ? INT_MAX - 2 : s.len * 2 + 1;
+            str_reserve(&s, want);
+            room = (size_t)(s.cap - s.len - 1);
+        }
+        n = fread(s.s + s.len, 1, room, f);
+        s.len += (int)n;
+        if (n < room) break; /* EOF or error */
+    }
+    s.s[s.len] = 0;
     if (ferror(f)) { fclose(f); str_free(&s); return NULL; }
     fclose(f);
     if (len) *len = s.len;
     return str_detach(&s);
 }
 
-/* glob with *, ?, ** and [...] classes; '*' does not cross '/', '**' does */
-int glob_match(const char *p, const char *s) {
-    while (*p) {
-        if (p[0] == '*' && p[1] == '*') {
-            p += 2;
-            if (plat_is_sep((unsigned char)*p)) p++;
-            for (;; s++) {
-                if (glob_match(p, s)) return 1;
-                if (!*s) return 0;
-            }
-        } else if (*p == '*') {
-            p++;
-            for (;; s++) {
-                if (glob_match(p, s)) return 1;
-                if (!*s || plat_is_sep((unsigned char)*s)) return 0;
-            }
-        } else if (*p == '?') {
-            if (!*s || plat_is_sep((unsigned char)*s)) return 0;
-            p++; s++;
-        } else if (*p == '[') {
-            int neg = 0, ok = 0;
-            const char *q = p + 1;
-            if (*q == '!' || *q == '^') { neg = 1; q++; }
-            while (*q && *q != ']') {
-                if (q[1] == '-' && q[2] && q[2] != ']') {
-                    if (*s >= q[0] && *s <= q[2]) ok = 1;
-                    q += 3;
-                } else {
-                    if (*s == *q) ok = 1;
-                    q++;
-                }
-            }
-            if (!*s || ok == neg) return 0;
-            p = *q ? q + 1 : q;
-            s++;
+/* One [...] class at p (p[0] == '['): sets *ok to whether c matches and
+   returns the pattern position after the class. */
+static const char *glob_class(const char *p, char c, int *ok) {
+    int neg = 0, m = 0;
+    const char *q = p + 1;
+    if (*q == '!' || *q == '^') { neg = 1; q++; }
+    while (*q && *q != ']') {
+        if (q[1] == '-' && q[2] && q[2] != ']') {
+            if (c >= q[0] && c <= q[2]) m = 1;
+            q += 3;
         } else {
-            if (*p != *s && !(plat_is_sep((unsigned char)*p) && plat_is_sep((unsigned char)*s))) return 0;
-            p++; s++;
+            if (c == *q) m = 1;
+            q++;
         }
     }
-    return *s == 0;
+    *ok = m != neg;
+    return *q ? q + 1 : q;
+}
+
+/* glob with *, ?, ** and [...] classes; '*' does not cross '/', '**' does.
+   Runs in O(len(pattern) * len(s)): instead of backtracking (exponential
+   for patterns like "*a*a*a*a*b"), it tracks the set of positions in s
+   that the pattern prefix processed so far can end at. */
+int glob_match(const char *p, const char *s) {
+    size_t n = strlen(s), k;
+    unsigned char small[2][256];
+    unsigned char *cur, *nxt, *tmp, *heap = NULL;
+    int any = 1, res;
+    if (n + 1 <= sizeof small[0]) {
+        cur = small[0];
+        nxt = small[1];
+    } else {
+        heap = xmalloc(2 * (n + 1));
+        cur = heap;
+        nxt = heap + n + 1;
+    }
+    memset(cur, 0, n + 1);
+    cur[0] = 1;
+    while (*p && any) {
+        any = 0;
+        if (p[0] == '*' && p[1] == '*') {
+            int on = 0;
+            p += 2;
+            if (plat_is_sep((unsigned char)*p)) p++;
+            for (k = 0; k <= n; k++) {
+                if (cur[k]) on = 1;
+                nxt[k] = (unsigned char)on;
+                any |= on;
+            }
+        } else if (*p == '*') {
+            int on = 0;
+            p++;
+            for (k = 0; k <= n; k++) {
+                if (cur[k]) on = 1;
+                nxt[k] = (unsigned char)on;
+                any |= on;
+                if (k < n && plat_is_sep((unsigned char)s[k])) on = 0;
+            }
+        } else {
+            const char *np = p + 1;
+            nxt[0] = 0;
+            if (*p == '[') {
+                int ok;
+                np = glob_class(p, 0, &ok);
+            }
+            for (k = 0; k < n; k++) {
+                int m = 0;
+                if (cur[k]) {
+                    char c = s[k];
+                    if (*p == '?') m = !plat_is_sep((unsigned char)c);
+                    else if (*p == '[') glob_class(p, c, &m);
+                    else m = *p == c || (plat_is_sep((unsigned char)*p) && plat_is_sep((unsigned char)c));
+                }
+                nxt[k + 1] = (unsigned char)m;
+                any |= m;
+            }
+            p = np;
+        }
+        tmp = cur; cur = nxt; nxt = tmp;
+    }
+    res = any && !*p && cur[n];
+    free(heap);
+    return res;
 }
 
 int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
