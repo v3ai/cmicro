@@ -550,32 +550,36 @@ CNode *json_parse(const char *text, char **err) {
 
 CNode *cnode_new(int type) { return cn_new(type); }
 
+static void cn_remove_at(CNode *map, int i) {
+    free(map->keys[i]);
+    cnode_free(map->vals[i]);
+    memmove(map->keys + i, map->keys + i + 1, sizeof(char *) * (size_t)(map->n - i - 1));
+    memmove(map->vals + i, map->vals + i + 1, sizeof(CNode *) * (size_t)(map->n - i - 1));
+    map->n--;
+}
+
+/* A map read from a file can hold a key more than once; cnode_get (and
+   everything applying a map in order) lets the last one win. So set
+   replaces the last one and drops the earlier ones, and del removes them
+   all: otherwise the value written back would be shadowed on reload. */
 void cnode_set(CNode *map, const char *key, CNode *val) {
-    int i;
+    int i, last = -1;
     if (!map || map->type != CN_MAP || !key) { cnode_free(val); return; }
-    for (i = 0; i < map->n; i++) {
-        if (map->keys[i] && !strcmp(map->keys[i], key)) {
-            cnode_free(map->vals[i]);
-            map->vals[i] = val;
-            return;
-        }
+    for (i = map->n - 1; i >= 0; i--) {
+        if (map->keys[i] && !strcmp(map->keys[i], key)) { last = i; break; }
     }
-    cn_push(map, xstrdup(key), val);
+    if (last < 0) { cn_push(map, xstrdup(key), val); return; }
+    cnode_free(map->vals[last]);
+    map->vals[last] = val;
+    for (i = last - 1; i >= 0; i--)
+        if (map->keys[i] && !strcmp(map->keys[i], key)) cn_remove_at(map, i);
 }
 
 void cnode_del(CNode *map, const char *key) {
     int i;
     if (!map || map->type != CN_MAP || !key) return;
-    for (i = 0; i < map->n; i++) {
-        if (map->keys[i] && !strcmp(map->keys[i], key)) {
-            free(map->keys[i]);
-            cnode_free(map->vals[i]);
-            memmove(map->keys + i, map->keys + i + 1, sizeof(char *) * (size_t)(map->n - i - 1));
-            memmove(map->vals + i, map->vals + i + 1, sizeof(CNode *) * (size_t)(map->n - i - 1));
-            map->n--;
-            return;
-        }
-    }
+    for (i = map->n - 1; i >= 0; i--)
+        if (map->keys[i] && !strcmp(map->keys[i], key)) cn_remove_at(map, i);
 }
 
 static void jw_str(Str *o, const char *s) {
