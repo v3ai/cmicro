@@ -1,18 +1,58 @@
-# micro, rewritten in C
+# cmicro: micro, rewritten in C
 
-A from-scratch C99 rewrite of [micro](https://github.com/micro-editor/micro),
-the modern terminal text editor. It reproduces micro's default key bindings,
-commands, options, `settings.json`/`bindings.json` formats, syntax highlighting
-(all of micro's ~160 YAML syntax files, embedded), all 25 bundled
-colorschemes, splits, tabs, multiple cursors, macros and crash-recovery
-backups. It has no dependencies beyond a C compiler and libc, and runs on
-Linux, macOS, the BSDs and natively on Windows (PowerShell, cmd, Windows
-Terminal).
+The [micro](https://github.com/micro-editor/micro) terminal text editor,
+rewritten from scratch in C99 with no dependencies. Same keys, commands,
+settings, syntax highlighting and colorschemes as micro. Runs on Linux,
+macOS, the BSDs and natively on Windows.
 
 ```
 make
 ./micro file.c
 ```
+
+## About
+
+micro is a modern, intuitive terminal editor: Ctrl-S saves, Ctrl-Q quits,
+Ctrl-C/Ctrl-V copy and paste, and the mouse just works. The original is
+written in Go. cmicro is a full reimplementation in portable C99 that needs
+nothing but a C compiler and the C library. It builds in seconds into a
+single ~700 KB executable with every syntax file and colorscheme built in.
+
+It aims to feel exactly like micro. If you already use micro, your
+`settings.json` and `bindings.json` work as they are, and the key bindings,
+commands, options and highlighting behave the same way. If you don't, press
+Ctrl-G inside the editor for help.
+
+Highlights:
+
+- **Same editor:** micro's default key bindings, ~130 actions, command bar
+  with completion and history, all of its options, and its settings and
+  bindings file formats
+- **Highlighting:** micro's ~160 syntax definitions and 25 colorschemes,
+  embedded, using micro's highlighting algorithm, in 16, 256 or 24-bit color
+- **Editing:** splits, tabs, multiple cursors, macros, undo/redo, regex
+  find and replace, softwrap, mouse support, system clipboard
+- **Safety:** crash-recovery backups, reload prompts when a file changes
+  on disk, saving through sudo on permission errors
+- **Everything from scratch:** its own regular-expression engine (Go/RE2
+  syntax, tested against Go's), YAML and JSON parsers and terminal renderer
+- **Portable:** one small platform layer for POSIX systems and one for the
+  Windows console; everything else is standard C
+
+Not included: micro's Lua plugin system, its built-in terminal emulator and
+the git diff gutter.
+
+## Download
+
+Prebuilt binaries are on the
+[Releases](https://github.com/v3ai/cmicro/releases) page:
+
+- `micro.exe`: Windows 10 (1809) or later. Run it from PowerShell, cmd or
+  Windows Terminal; no installation needed.
+- `micro-linux-x86_64`: statically linked Linux build
+  (`chmod +x micro-linux-x86_64`).
+
+Or build it yourself; see below.
 
 ## Building
 
