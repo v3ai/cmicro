@@ -17,6 +17,18 @@ void backup_flush_all(void);                 /* backup.c */
 
 int term_ready;
 
+/* print text for the cooked-mode terminal with control characters (C0
+   except newline/tab, DEL, and UTF-8-encoded C1) shown as '?', so a file
+   name can't smuggle escape sequences to the terminal */
+static void put_sanitized(FILE *f, const char *s) {
+    const unsigned char *p = (const unsigned char *)s;
+    for (; *p; p++) {
+        if (*p == 0xC2 && p[1] >= 0x80 && p[1] <= 0x9F) { fputc('?', f); p++; }
+        else if ((*p < 0x20 && *p != '\n' && *p != '\t') || *p == 0x7F) fputc('?', f);
+        else fputc(*p, f);
+    }
+}
+
 int term_prompt(const char *msg, const char *const *choices, int nchoices) {
     char line[256];
     int was = term_ready, i = nchoices - 1;
@@ -27,7 +39,7 @@ int term_prompt(const char *msg, const char *const *choices, int nchoices) {
     for (;;) {
         size_t n;
         int k;
-        fputs(msg, stdout);
+        put_sanitized(stdout, msg);
         fflush(stdout);
         if (!fgets(line, sizeof line, stdin)) break;
         n = strlen(line);
@@ -165,7 +177,9 @@ int main(int argc, char **argv) {
         } else if (!strcmp(a, "-debug") || !strcmp(a, "-profile")) {
             /* accepted for compatibility */
         } else if (!strcmp(a, "-clean") || !strcmp(a, "-plugin")) {
-            fprintf(stderr, "micro: %s is not supported in this build\n", a);
+            fputs("micro: ", stderr);
+            put_sanitized(stderr, a);
+            fputs(" is not supported in this build\n", stderr);
             return 1;
         } else if (a[0] == '+' && a[1] >= '0' && a[1] <= '9') {
             const char *c = strchr(a, ':');
@@ -233,7 +247,9 @@ int main(int argc, char **argv) {
     for (i = 0; i < nfiles; i++) {
         Pane *p = editor_open_file_pane(files[i].path, &err);
         if (!p) {
-            fprintf(stderr, "micro: %s\n", err ? err : "error opening file");
+            fputs("micro: ", stderr);
+            put_sanitized(stderr, err ? err : "error opening file");
+            fputc('\n', stderr);
             free(err);
             err = NULL;
             continue;
