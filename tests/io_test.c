@@ -380,6 +380,24 @@ static void test_save_paths(void) {
     buf_free(b);
 }
 
+/* option values from settings.json / the command line */
+static void test_option_parse(void) {
+    static const char *bad[] = {"0", "0.5", "0.999", "1e-9", "-1", "257", "x", "nan"};
+    OptVal v;
+    char *err;
+    size_t i;
+    for (i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        err = NULL;
+        CHECK(opt_parse(O_TABSIZE, bad[i], &v, &err) == -1 && err != NULL);
+        free(err);
+    }
+    err = NULL;
+    CHECK(opt_parse(O_TABSIZE, "4", &v, &err) == 0 && v.i == 4);
+    CHECK(opt_parse(O_TABSIZE, "1.5", &v, &err) == 0 && v.i == 1);
+    CHECK(opt_parse(O_TABSIZE, "256.7", &v, &err) == 0 && v.i == 256);
+    free(err);
+}
+
 static void test_private(void) {
     char *p = tpath("state"), *victim = tpath("victim"), *err = NULL, *data;
     Buffer *b = buf_new_empty();
@@ -564,6 +582,7 @@ int main(void) {
     test_undo();
     test_files();
     test_save_paths();
+    test_option_parse();
     test_private();
     test_backup_names();
     test_backups();
