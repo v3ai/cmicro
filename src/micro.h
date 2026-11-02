@@ -231,6 +231,13 @@ void pane_relocate(Pane *p);
 void pane_center(Pane *p);
 void pane_scroll(Pane *p, int n);
 int  pane_screen_to_loc(Pane *p, int sx, int sy, Loc *out);
+/* softwrap row starts (byte offsets, visual columns) of line y; the arrays
+   stay valid until the next pane geometry call */
+int  pane_wrap_line(const Pane *p, int y, const int **bx, const int **vx);
+#define PANE_MAX_TABSIZE 1024
+#define PANE_MAX_VX (1 << 30)
+int  pane_tabsize(const Buffer *b);   /* tabsize option clamped to [1, PANE_MAX_TABSIZE] */
+int  vx_add(int vx, int w);           /* saturating visual column addition */
 void cur_store_vx(Pane *p, Cursor *c);
 void cur_up(Pane *p, Cursor *c, int n);
 void cur_down(Pane *p, Cursor *c, int n);
@@ -320,6 +327,8 @@ void scr_show_cursor(int x, int y);
 void scr_hide_cursor(void);
 void scr_flush(void);
 void scr_invalidate(void);
+void scr_clip(int x, int y, int w, int h); /* restrict drawing to a rectangle */
+void scr_noclip(void);
 void scr_set_mouse(int on);
 void scr_osc52(const char *text, int len);
 extern int scr_truecolor;
@@ -410,6 +419,7 @@ void render_infobar(void);
 void render_keymenu(void);
 int  layout_top(void);
 int  layout_bottom_reserved(void);
+int  tabbar_tab_at(int x);            /* index of the tab drawn at column x, or -1 */
 
 /* prompt */
 void prompt_text(const char *msg, const char *initial, int hist, PromptDone done,
