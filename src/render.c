@@ -204,7 +204,7 @@ void render_pane(Pane *p, int active) {
     const char *ich = BOPTS(b, O_INDENTCHAR);
     int ichcp = ' ';
     unsigned char *smask = NULL;
-    int smask_cap = 0;
+    int smask_cap = 0, sline = -1; /* smask holds the search matches of `sline` */
     int *wbx = NULL, *wvx = NULL, wcap = 0, wn = 0, wline = -1; /* softwrap rows of `line` */
     int cursor_drawn = 0;
     char *showchars = BOPTS(b, O_SHOWCHARS);
@@ -288,13 +288,14 @@ void render_pane(Pane *p, int active) {
                 if (row + 1 < nrows) bend = wbx[row + 1];
                 left = vstart;
             }
-            if (hlsearch) {
+            if (hlsearch && sline != line) {
                 if (smask_cap < ln->len + 1) {
                     smask_cap = ln->len + 64;
                     smask = xrealloc(smask, (size_t)smask_cap);
                 }
                 memset(smask, 0, (size_t)ln->len + 1);
                 search_highlight_ranges(p, line, smask, ln->len);
+                sline = line;
             }
             /* clear row */
             scr_fill(x0, sy, tw, 1, ' ', base_line);
