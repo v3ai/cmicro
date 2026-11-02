@@ -1340,18 +1340,22 @@ typedef struct {
     int then_quit;
 } SudoCtx;
 
+/* saves through the sudo command; returns 1 if it worked */
+static int sudo_save(Pane *p, const char *path) {
+    char *err = NULL;
+    if (buf_save_sudo(p->buf, path, &err) == 0) {
+        editor_set_message("Saved %s", path);
+        return 1;
+    }
+    editor_set_error("%s", err);
+    free(err);
+    return 0;
+}
+
 static void sudo_yn(int yes, int canceled, void *data) {
     SudoCtx *s = data;
-    char *err = NULL;
-    if (yes && !canceled) {
-        if (buf_save_sudo(s->p->buf, s->path, &err) == 0) {
-            editor_set_message("Saved %s", s->path);
-            if (s->then_quit) quit_after_save(s->p);
-        } else {
-            editor_set_error("%s", err);
-            free(err);
-        }
-    }
+    if (yes && !canceled && sudo_save(s->p, s->path) && s->then_quit)
+        quit_after_save(s->p);
     free(s->path);
     free(s);
 }
@@ -1365,23 +1369,23 @@ static int save_to(Pane *p, const char *path, int then_quit) {
         return 1;
     }
     if (rc == -2) {
-        SudoCtx *s = xmalloc(sizeof *s);
-        s->p = p;
-        s->path = xstrdup(path);
-        s->then_quit = then_quit;
+        SudoCtx *s;
+        char *msg;
         free(err);
         if (!plat_has_sudo()) {
             editor_set_error("Permission denied. Save with sudo not supported on Windows");
-            free(s->path);
-            free(s);
             return 0;
         }
-        if (BOPT(p->buf, O_AUTOSU)) sudo_yn(1, 0, s);
-        else {
-            char *msg = xsprintf("Permission denied. Do you want to save this file using %s? (y,n)", GOPTS(O_SUCMD));
-            prompt_yn(msg, sudo_yn, s);
-            free(msg);
-        }
+        /* autosu saves now: report it, and leave then_quit to the caller
+           (which quits on a return of 1) so the pane isn't closed twice */
+        if (BOPT(p->buf, O_AUTOSU)) return sudo_save(p, path);
+        s = xmalloc(sizeof *s);
+        s->p = p;
+        s->path = xstrdup(path);
+        s->then_quit = then_quit;
+        msg = xsprintf("Permission denied. Do you want to save this file using %s? (y,n)", GOPTS(O_SUCMD));
+        prompt_yn(msg, sudo_yn, s);
+        free(msg);
         return 0;
     }
     editor_set_error("%s", err);
