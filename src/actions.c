@@ -322,13 +322,6 @@ static unsigned long long rand64(void) {
     return z ^ (z >> 31);
 }
 
-/* Create a new, empty temporary file and return its malloc'd path (NULL on
-   failure).  The name is unpredictable and, on POSIX systems, the file is
-   created exclusively (fopen "x" = O_CREAT|O_EXCL), so a file or symlink
-   planted in the shared temp directory is never opened, truncated or
-   followed (on POSIX inside a private 0700 directory, see temp_dir_for).
-   Optionally fills it with `data`.  Used by the clipboard tools
-   here and by `run`/`textfilter` in commands.c. */
 static char *private_tmp; /* POSIX: a mode 0700 directory of our own */
 
 static void private_tmp_cleanup(void) {
@@ -369,6 +362,13 @@ static char *temp_dir_for(int posix) {
     return dir;
 }
 
+/* Create a new, empty temporary file and return its malloc'd path (NULL on
+   failure).  The name is unpredictable and, on POSIX systems, the file is
+   created exclusively (fopen "x" = O_CREAT|O_EXCL), so a file or symlink
+   planted in the shared temp directory is never opened, truncated or
+   followed (on POSIX inside a private 0700 directory, see temp_dir_for).
+   Optionally fills it with `data`.  Used by the clipboard tools
+   here and by `run`/`textfilter` in commands.c. */
 char *act_tmpfile_create(const char *tag, const char *data, int len) {
     int posix = !strcmp(plat_null_device(), "/dev/null");
     char *dir = temp_dir_for(posix);
