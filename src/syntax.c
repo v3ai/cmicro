@@ -216,6 +216,8 @@ Syntax *syntax_detect(const char *path, const char *firstline, const char **line
 struct ReFilter {
     int active;      /* the fields below are valid and worth checking */
     int cf;          /* cached re_context_free() */
+    Regex *anch;     /* region start/end/skip that isn't context-free: \A(?:re),
+                        or NULL (see find_cached and masked_from) */
     int req;         /* an ASCII byte every match contains, or -1 */
     unsigned char wb;
     unsigned char ok[256];
@@ -613,6 +615,24 @@ static Regex *compile_rule(const char *src, ReFilter **flt, char **err) {
     return re;
 }
 
+/* A region's start/end/skip regex: also compile, if it isn't context-free,
+   the version anchored at the subject start (NULL if that fails: the
+   callers then search without caching, as before). */
+static Regex *compile_region_rule(const char *src, ReFilter **flt, char **err) {
+    Regex *re = compile_rule(src, flt, err);
+    if (re && !(*flt)->cf) {
+        char *a = xsprintf("\\A(?:%s)", src);
+        (*flt)->anch = re_compile(a, 0, NULL);
+        free(a);
+    }
+    return re;
+}
+
+static void free_filter(ReFilter *f) {
+    if (f) re_free(f->anch);
+    free(f);
+}
+
 /* ---------------- rule parsing ---------------- */
 
 /* Arrays grow to the next power of two (the capacity is implied by the
@@ -698,22 +718,22 @@ static int parse_rules(Syntax *syn, CNode *list, Rules *out, Region *parent, cha
                 r->limit_group = s ? group_id(s) : r->group;
                 r->parent = parent;
                 s = cnode_str(v, "start");
-                if (s && *s) r->start = compile_rule(s, &r->start_flt, &e);
+                if (s && *s) r->start = compile_region_rule(s, &r->start_flt, &e);
                 free(e); e = NULL;
                 s = cnode_str(v, "end");
-                if (s && *s) r->end = compile_rule(s, &r->end_flt, &e);
+                if (s && *s) r->end = compile_region_rule(s, &r->end_flt, &e);
                 free(e); e = NULL;
                 s = cnode_str(v, "skip");
-                if (s && *s) r->skip = compile_rule(s, &r->skip_flt, &e);
+                if (s && *s) r->skip = compile_region_rule(s, &r->skip_flt, &e);
                 free(e);
                 if (!r->start || !r->end) {
                     if (err && !*err) *err = xsprintf("%s: bad region %s", syn->file, key);
                     re_free(r->start);
                     re_free(r->end);
                     re_free(r->skip);
-                    free(r->start_flt);
-                    free(r->end_flt);
-                    free(r->skip_flt);
+                    free_filter(r->start_flt);
+                    free_filter(r->end_flt);
+                    free_filter(r->skip_flt);
                     free(r);
                     continue;
                 }
@@ -747,16 +767,49 @@ int syntax_load(Syntax *s, char **err) {
 /* Skip masks.  micro hides matches of a region's `skip` regex before
  * looking for its start/end.  Masks are computed once per line and reused
  * for later offsets as long as the offset doesn't fall inside a skip match
- * (for context-free skip regexes the masking from there on is identical). */
+ * and the masking from there on is identical (see mask_valid_at). */
 typedef struct {
     Regex *skip;
     int from, gen, cap;
     char *m;             /* masked copy of the line (valid from `from`) */
     unsigned char *in;   /* in[i]: i is strictly inside a skip match */
+    unsigned char *st;   /* st[i]: what the scan found at i (ST_*) */
 } SkipMask;
+
+/* no match starts at i / an empty one does / a non-empty one does / i was
+   stepped over after an empty match (inside a multi-byte character) */
+enum { ST_NONE, ST_EMPTY, ST_MATCH, ST_STEPPED };
 
 static SkipMask skm[16];
 static int nskm, skm_gen;
+
+/* set by tests/syntax_filter_fuzz.c to check the per-line caches (skip
+   masks, region start/end and pattern searches) against plain searches */
+static int syntax_nocache;
+
+/* Would masking line[off..len) from scratch give k's mask (computed from
+   k->from <= off, with off not strictly inside one of its matches)?  A
+   match starting after off sees the same bytes, and the same byte before
+   it, whichever of the two subject starts is used (the regex looks back
+   one byte at most, for \b, \B and (?m)^; ^ and \A only match at the
+   subject start).  So both scans agree from off on if they agree on the
+   match at off itself, which for a skip regex that isn't context-free is
+   checked with its anchored version. */
+static int mask_valid_at(const SkipMask *k, const Regex *skip, const ReFilter *sf, const char *sub, int n,
+                         int off) {
+    int caps[2], old_end, new_end;
+    if (off == k->from || context_free(skip, sf)) return 1;
+    if (!sf || !sf->anch || k->st[off] == ST_STEPPED) return 0;
+    if (k->st[off] == ST_MATCH) {
+        for (old_end = off + 1; k->in[old_end]; old_end++)
+            ;
+        old_end -= off;
+    } else {
+        old_end = k->st[off] == ST_EMPTY ? 0 : -1;
+    }
+    new_end = re_search(sf->anch, sub, n, 0, caps, 1) ? caps[1] : -1;
+    return old_end == new_end;
+}
 
 static const char *masked_from(Regex *skip, const ReFilter *sf, const char *line, int off, int len, int *gen) {
     int i, slot = -1, pos = 0, n = len - off, caps[2];
@@ -765,7 +818,8 @@ static const char *masked_from(Regex *skip, const ReFilter *sf, const char *line
     for (i = 0; i < nskm; i++) {
         if (skm[i].skip != skip) continue;
         slot = i;
-        if (context_free(skip, sf) && skm[i].from <= off && !skm[i].in[off]) {
+        if (!syntax_nocache && skm[i].from <= off && !skm[i].in[off] &&
+            mask_valid_at(&skm[i], skip, sf, sub, n, off)) {
             *gen = skm[i].gen;
             return skm[i].m + off;
         }
@@ -777,19 +831,24 @@ static const char *masked_from(Regex *skip, const ReFilter *sf, const char *line
         k->cap = len + 64;
         k->m = xrealloc(k->m, (size_t)k->cap);
         k->in = xrealloc(k->in, (size_t)k->cap);
+        k->st = xrealloc(k->st, (size_t)k->cap);
     }
     k->skip = skip;
     k->from = off;
     k->gen = ++skm_gen;
     memcpy(k->m + off, sub, (size_t)n);
     memset(k->in + off, 0, (size_t)n + 1);
+    memset(k->st + off, ST_NONE, (size_t)n + 1);
     while (pos <= n && search(skip, sf, sub, n, pos, caps)) {
         if (caps[1] > caps[0]) {
             memset(k->m + off + caps[0], 1, (size_t)(caps[1] - caps[0]));
             if (caps[1] - caps[0] > 1) memset(k->in + off + caps[0] + 1, 1, (size_t)(caps[1] - caps[0] - 1));
+            k->st[off + caps[0]] = ST_MATCH;
             pos = caps[1];
         } else {
+            k->st[off + caps[0]] = ST_EMPTY;
             pos = caps[1] < n ? utf8_next(sub, n, caps[1]) : n + 1;
+            for (i = caps[1] + 1; i < pos && i < n; i++) k->st[off + i] = ST_STEPPED;
         }
     }
     *gen = k->gen;
@@ -816,31 +875,56 @@ static int find_index(Regex *re, const ReFilter *rf, Regex *skip, const ReFilter
     return find_index_gen(re, rf, skip, sf, s, off, len, ms, me, &gen);
 }
 
-/* Per-line cache of region-start searches.  Without it, every region
-   transition rescans the rest of the line for every region start, which is
-   quadratic on long minified lines.  A context-free start regex has the
-   same leftmost match from a later offset (or still none), provided the
-   skip mask it was searched in is still valid there. */
+/* Per-line cache of region start and end searches.  Without it, every
+   region transition rescans the rest of the line for every region start
+   (and for the end of the region it returns to), which is quadratic on
+   long minified lines.  A context-free regex has the same leftmost match
+   from a later offset (or still none), provided the skip mask it was
+   searched in is still valid there.  For one that isn't context-free, only
+   a match starting exactly at the new offset can differ (a match starting
+   later sees the same bytes and the same byte before it), and that one is
+   checked with the regex's anchored version. */
+#define NSCACHE 128
 typedef struct {
     Regex *re, *skip;
     int from, found, s, e, gen; /* absolute positions */
 } StartCache;
 
-static StartCache scache[64];
+static StartCache scache[NSCACHE];
 static int nscache;
 
-static int find_start(Region *r, const char *line, int off, int len, int *ms, int *me) {
-    int i, s = 0, e = 0, found, gen = 0;
-    if (!context_free(r->start, r->start_flt))
-        return find_index(r->start, r->start_flt, r->skip, r->skip_flt, line, off, len, ms, me);
+static int find_cached(Regex *re, const ReFilter *rf, Regex *skip, const ReFilter *sf, const char *line, int off,
+                       int len, int *ms, int *me) {
+    int i, s = 0, e = 0, found, gen = 0, caps[2];
+    const Regex *anch = NULL;
+    if (syntax_nocache) return find_index(re, rf, skip, sf, line, off, len, ms, me);
+    if (!context_free(re, rf)) {
+        anch = rf ? rf->anch : NULL;
+        if (!anch) return find_index(re, rf, skip, sf, line, off, len, ms, me);
+    }
     for (i = 0; i < nscache; i++) {
         StartCache *c = &scache[i];
-        if (c->re == r->start && c->skip == r->skip && c->from <= off) {
+        if (c->re == re && c->skip == skip && c->from <= off) {
             int ok = 1;
-            if (r->skip) {
+            const char *sub = line + off;
+            if (skip) {
                 int g;
-                masked_from(r->skip, r->skip_flt, line, off, len, &g);
+                sub = masked_from(skip, sf, line, off, len, &g);
                 ok = g == c->gen;
+            }
+            if (ok && anch && c->from < off) {
+                if (re_search(anch, sub, len - off, 0, caps, 1)) {
+                    *ms = caps[0];
+                    *me = caps[1];
+                    return 1;
+                }
+                if (!c->found) return 0;
+                if (c->s > off) {
+                    *ms = c->s - off;
+                    *me = c->e - off;
+                    return 1;
+                }
+                break;
             }
             if (ok && !c->found) return 0;
             if (ok && c->s >= off) {
@@ -851,11 +935,11 @@ static int find_start(Region *r, const char *line, int off, int len, int *ms, in
             break;
         }
     }
-    found = find_index_gen(r->start, r->start_flt, r->skip, r->skip_flt, line, off, len, &s, &e, &gen);
-    if (i == nscache && nscache < 64) nscache++;
-    if (i < 64) {
-        scache[i].re = r->start;
-        scache[i].skip = r->skip;
+    found = find_index_gen(re, rf, skip, sf, line, off, len, &s, &e, &gen);
+    if (i == nscache && nscache < NSCACHE) nscache++;
+    if (i < NSCACHE) {
+        scache[i].re = re;
+        scache[i].skip = skip;
         scache[i].from = off;
         scache[i].found = found;
         scache[i].s = s + off;
@@ -864,6 +948,10 @@ static int find_start(Region *r, const char *line, int off, int len, int *ms, in
     }
     if (found) { *ms = s; *me = e; }
     return found;
+}
+
+static int find_start(const Region *r, const char *line, int off, int len, int *ms, int *me) {
+    return find_cached(r->start, r->start_flt, r->skip, r->skip_flt, line, off, len, ms, me);
 }
 
 static void fill(unsigned short *hl, int a, int b, int g) {
@@ -884,7 +972,7 @@ static int npcache;
 
 static int pat_search(Regex *re, const ReFilter *flt, const char *line, int off, int end, int pos, int *ms, int *me) {
     int i, caps[2], found, apos = off + pos;
-    int cf = context_free(re, flt);
+    int cf = !syntax_nocache && context_free(re, flt);
     if (cf) {
         for (i = 0; i < npcache; i++) {
             PatCache *c = &pcache[i];
@@ -991,7 +1079,7 @@ Region *syntax_highlight_line(Syntax *syn, Region *cur, const char *line, int le
             int es = 0, ee = 0, have_end, search_nesting = 1, sublen = len - off;
             int first_s = sublen, first_e = 0, i;
             Region *first = NULL;
-            have_end = off <= len && find_index(cur->end, cur->end_flt, cur->skip, cur->skip_flt, line, off, len, &es, &ee);
+            have_end = off <= len && find_cached(cur->end, cur->end_flt, cur->skip, cur->skip_flt, line, off, len, &es, &ee);
             if (have_end) {
                 if (es == 0) search_nesting = 0;
                 else { first_s = es; first_e = ee; }
