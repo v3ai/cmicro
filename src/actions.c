@@ -2137,7 +2137,7 @@ static int a_jump_to_matching_brace(Pane *p) {
     /* brace under the cursor: jump past its match; brace left of it: onto the match */
     if (loc_cmp(br, c->loc) == 0) c->loc = buf_move_chars(BUF, m, 1);
     else c->loc = m;
-    cur_deselect(c, 1);
+    c->sel[0] = c->sel[1] = c->orig[0] = c->orig[1] = c->loc;
     cur_store_vx(p, c);
     return 1;
 }
