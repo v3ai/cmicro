@@ -77,6 +77,18 @@ def test_control_chars_are_sanitized():
     assert finish(t)
 
 
+def test_one_column_format_chars_are_replaced():
+    # ALM, MVS and tag characters count one column: drawn as U+FFFD, never
+    # sent to the terminal (ALM is a bidi control)
+    p = write("fmt.txt", "a؜b᠎c\U000E0041d\U000E007Fe\n".encode())
+    t = editor([p], extra=["-ruler", "off"])
+    quiet(t)
+    assert t.line(0).startswith("a�b�c�d�e"), repr(t.line(0))
+    for s in ("؜", "᠎", "\U000E0041", "\U000E007F"):
+        assert s.encode() not in t.raw, repr(s)
+    assert finish(t)
+
+
 def test_tiny_and_huge_sizes():
     p = write("small.c", b"int main() {\n\treturn 0;\n}\n" * 30)
     t = editor([p])
