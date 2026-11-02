@@ -1,0 +1,6 @@
+# build outputs
+micro
+micro.exe
+*.o
+tests/syntax_regex_test
+__pycache__/
