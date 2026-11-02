@@ -141,21 +141,24 @@ void history_load(void) {
 
 void history_save(void) {
     char *path, *dir;
-    FILE *f;
-    int k, i;
+    PlatSave *f;
+    Str o;
+    int k, i, denied = 0;
     if (!config_dir || !GOPT(O_SAVEHISTORY)) return;
     dir = xsprintf("%s/buffers", config_dir);
     if (!plat_is_dir(config_dir)) { free(dir); return; }
-    plat_mkdir_p(dir);
+    plat_mkdir_private(dir);
     free(dir);
-    path = history_path();
-    f = plat_fopen(path, "w");
-    free(path);
-    if (!f) return;
+    str_init(&o);
     for (k = 0; k < HIST_N; k++)
         for (i = 0; i < E.nhistory[k]; i++)
-            if (!strchr(E.history[k][i], '\n')) fprintf(f, "%s\t%s\n", hist_names[k], E.history[k][i]);
-    fclose(f);
+            if (!strchr(E.history[k][i], '\n')) str_printf(&o, "%s\t%s\n", hist_names[k], E.history[k][i]);
+    /* atomic and private: history can hold search terms and commands */
+    path = history_path();
+    f = plat_save_open(path, (long long)o.len, PLAT_SAVE_PRIVATE, &denied);
+    free(path);
+    if (f) plat_save_close(f, plat_save_write(f, o.s ? o.s : "", (size_t)o.len) == 0);
+    str_free(&o);
 }
 
 /* ---------------- editing helpers ---------------- */
