@@ -12,7 +12,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../src/regex.h"
-#include "../src/util.h"
 
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "check failed: %s (line %d)\n", #c, __LINE__); abort(); } } while (0)
 
@@ -66,7 +65,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
         CHECK(re_search(re, subj, slen, caps[0], caps1, ncap));
         CHECK(!memcmp(caps, caps1, sizeof(int) * 2 * (size_t)ncap));
         if (caps[1] == pos) {
-            pos = pos < slen ? utf8_next(subj, slen, pos) : slen + 1;
+            pos = pos < slen ? pos + 1 : slen + 1;
         } else {
             pos = caps[1];
         }
