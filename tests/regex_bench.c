@@ -14,6 +14,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifdef __unix__
+#include <sys/resource.h>
+#endif
 #include "../src/regex.h"
 #include "../src/syntax.h"
 #include "../src/util.h"
@@ -132,5 +135,12 @@ int main(int argc, char **argv) {
         free(pt);
     }
     printf("%d lines, %ld matches, hash %lx, %.3f s\n", total_lines, matches, hash, t);
+#ifdef __unix__
+    {
+        struct rusage ru;
+        getrusage(RUSAGE_SELF, &ru);
+        printf("max RSS %ld KB\n", ru.ru_maxrss);
+    }
+#endif
     return 0;
 }
