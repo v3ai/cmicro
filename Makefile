@@ -37,8 +37,28 @@ src/%.o: src/%.c src/*.h
 runtime:
 	python3 tools/embed.py
 
-test: micro tests/syntax_regex_test
+test: micro tests/syntax_regex_test tests/regex_test tests/syntax_filter_test
 	./tests/syntax_regex_test runtime/syntax/*.yaml
+	./tests/regex_test
+	./tests/syntax_filter_test runtime/syntax/*.yaml -- src/main.c runtime/help/options.md tests/term.py Makefile
+
+# Slower, more thorough checks: file I/O tests (plain and under
+# ASan/UBSan) and end-to-end tests driving the editor in a pty (need
+# python3 with pyte: pip install pyte).
+check: test
+	sh tests/io_run.sh $(CC)
+	python3 tests/term_test.py ./micro
+	python3 tests/io_term_test.py ./micro
+	python3 tests/act_scenarios.py ./micro
+
+RT_SRCS = src/regex.c src/conf.c src/util.c src/colors.c src/runtime.c \
+          src/runtime_data.c src/platform.c src/platform_win32.c
+
+tests/regex_test: tests/regex_test.c src/regex.c src/util.c src/platform.c src/platform_win32.c src/*.h
+	$(CC) $(CFLAGS) -o $@ tests/regex_test.c src/regex.c src/util.c src/platform.c src/platform_win32.c
+
+tests/syntax_filter_test: tests/syntax_filter_fuzz.c src/syntax.c $(RT_SRCS) src/*.h
+	$(CC) $(CFLAGS) -o $@ tests/syntax_filter_fuzz.c $(RT_SRCS)
 
 tests/syntax_regex_test: tests/syntax_regex_test.c src/conf.c src/regex.c src/util.c src/platform.c src/platform_win32.c
 	$(CC) $(CFLAGS) -o $@ $^
@@ -48,6 +68,7 @@ install: micro
 	install -m 755 micro $(DESTDIR)$(PREFIX)/bin/micro
 
 clean:
-	rm -f micro micro.exe $(OBJS) tests/syntax_regex_test
+	rm -f micro micro.exe $(OBJS) tests/syntax_regex_test tests/regex_test tests/syntax_filter_test \
+	      tests/io_test tests/io_test_asan
 
-.PHONY: runtime test install clean windows
+.PHONY: runtime test check install clean windows

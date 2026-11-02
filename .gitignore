@@ -6,3 +6,5 @@ tests/syntax_regex_test
 __pycache__/
 tests/io_test
 tests/io_test_asan
+tests/regex_test
+tests/syntax_filter_test

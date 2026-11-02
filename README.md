@@ -18,7 +18,7 @@ micro is a modern, intuitive terminal editor: Ctrl-S saves, Ctrl-Q quits,
 Ctrl-C/Ctrl-V copy and paste, and the mouse just works. The original is
 written in Go. cmicro is a full reimplementation in portable C99 that needs
 nothing but a C compiler and the C library. It builds in seconds into a
-single ~700 KB executable with every syntax file and colorscheme built in.
+single ~750 KB executable with every syntax file and colorscheme built in.
 
 It aims to feel exactly like micro. If you already use micro, your
 `settings.json` and `bindings.json` work as they are, and the key bindings,
@@ -63,7 +63,8 @@ nothing newer than C99).
 
 ```
 make                 # builds ./micro (micro.exe on Windows)
-make test            # compiles every regex in every bundled syntax file
+make test            # regex engine, syntax files and highlighter checks (fast)
+make check           # also file I/O tests under ASan/UBSan and pty end-to-end tests (needs pyte)
 make install         # installs to /usr/local/bin (PREFIX=... to change)
 make windows         # cross-compiles micro.exe with MinGW-w64
 make runtime         # re-embed runtime/ files after editing them (needs python3)
@@ -136,7 +137,7 @@ implemented here directly:
 
 | micro uses                         | this rewrite                                   |
 |------------------------------------|------------------------------------------------|
-| Go `regexp` (RE2)                  | `src/regex.c`: RE2-syntax engine, backtracking VM with a visited-state table (linear time) |
+| Go `regexp` (RE2)                  | `src/regex.c`: RE2-syntax engine: lazy DFA + reverse DFA + Pike VM (linear time, bounded memory) |
 | `yaml.v2` for syntax files         | `src/conf.c`: YAML subset parser                |
 | `json5` for settings/bindings      | `src/conf.c`: lenient JSON (comments, trailing commas) |
 | `tcell` terminal library           | `src/screen.c` + `src/input.c`: diffing cell renderer, escape-sequence decoder, SGR mouse, bracketed paste, 256/truecolor |
@@ -220,11 +221,22 @@ tools/screenshot.py  regenerates docs/screenshot.png (needs pyte, pillow)
 ## Testing
 
 - `make test` compiles all 3,794 regular expressions from micro's syntax
-  files with the built-in engine.
-- The regex engine is differential-tested against Go's `regexp`: every
-  bundled syntax pattern against 365 sample lines (53,328 lines of match and
-  capture output) is identical, plus ~1.3M randomly generated RE2 patterns.
-  Long lines are handled in linear time (e.g. a match after 3 MB of text).
+  files, runs the regex engine's regression tests (`tests/regex_test.c`)
+  and checks the highlighter's search prefilter against plain regex search
+  for every bundled rule.
+- `make check` additionally runs the file I/O tests (`tests/io_run.sh`:
+  line endings, NUL bytes, atomic saves, symlinks, permissions, backups,
+  sudo save with hostile file names), plainly and under ASan/UBSan, and the
+  end-to-end pty tests (`tests/term_test.py`, `tests/io_term_test.py`,
+  `tests/act_scenarios.py`).
+- The regex engine is differential-tested against Go's `regexp`
+  (`tests/regex_diff/`): every bundled syntax pattern (155k cases) and
+  ~1.2M randomly generated RE2 patterns give identical matches and
+  captures. Matching is linear in the text length, with bounded memory.
+- libFuzzer harnesses (`tests/*_fuzz.c`) cover the regex engine, YAML/JSON
+  parsers, UTF-8 helpers, syntax loading and highlighting, terminal input
+  decoding and buffer loading/editing/undo; each ran millions of inputs
+  under ASan/UBSan.
 - `tests/term.py` drives the editor in a pseudo-terminal (via `pyte`) for
   end-to-end tests of editing, prompts, splits, tabs, mouse, paste, resize,
   softwrap, config files and crash recovery.
@@ -237,11 +249,12 @@ tools/screenshot.py  regenerates docs/screenshot.png (needs pyte, pillow)
   saving with CRLF defaults, search, splits, `cmd.exe` commands, settings and
   crash-recovery backups. (It hasn't yet been run on a physical Windows
   machine; Wine itself can't test Ctrl-C as a key or window resizing.)
-- Highlighting long minified lines is linear: a 620 KB single-line
-  JavaScript file highlights in about half a second.
+- Highlighting is linear on long lines: a 620 KB single-line minified
+  JavaScript file highlights in about 20 ms.
 
-Known small differences: case-insensitive search folds ASCII letters only,
-and Unicode classes such as `\pL` are approximated by code-point ranges.
+Known small difference: Unicode classes such as `\pL` are approximated by
+code-point ranges (case-insensitive matching uses Unicode simple folding,
+as Go does).
 
 ## License
 
