@@ -110,6 +110,13 @@ Buffer *editor_find_buffer(const char *path) {
     return f.found;
 }
 
+/* "file:LINE:COL" numbers; atoi() is undefined on overflow */
+static int parse_pos(const char *s) {
+    long v = strtol(s, NULL, 10);
+    if (v < 0) return 0;
+    return v > 2000000000L ? 2000000000 : (int)v;
+}
+
 Pane *editor_open_file_pane(const char *arg, char **err) {
     char *path = xstrdup(arg);
     int line = -1, col = -1;
@@ -118,10 +125,10 @@ Pane *editor_open_file_pane(const char *arg, char **err) {
     if (GOPT(O_PARSECURSOR)) {
         char *c1 = strchr(path, ':');
         if (c1 && c1[1] >= '0' && c1[1] <= '9') {
-            line = atoi(c1 + 1);
+            line = parse_pos(c1 + 1);
             {
                 char *c2 = strchr(c1 + 1, ':');
-                if (c2) col = atoi(c2 + 1);
+                if (c2) col = parse_pos(c2 + 1);
             }
             *c1 = 0;
         }
