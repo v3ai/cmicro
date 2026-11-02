@@ -1322,7 +1322,8 @@ static DFA *dfa_new(const Regex *re, const Prog *p, int longest, int reverse) {
     d->nlist = xmalloc(sizeof(int) * (size_t)p->n);
     d->mark = xcalloc((size_t)p->n, sizeof(unsigned));
     d->budget = DFA_BUDGET;
-    if (d->budget / 16 < (size_t)p->n * sizeof(int)) d->budget = (size_t)p->n * sizeof(int) * 16;
+    /* room for a few states even with every instruction in the kernel */
+    if (d->budget / 4 < (size_t)p->n * sizeof(int)) d->budget = (size_t)p->n * sizeof(int) * 4;
     d->hsize = 64;
     d->htab = xmalloc(sizeof(int) * (size_t)d->hsize);
     d->ckp = 64;
