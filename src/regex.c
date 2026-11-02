@@ -14,8 +14,10 @@
  *
  * DFA states are cached per Regex in bounded memory (the cache is flushed
  * when full), and a first-byte prefilter (memchr or a byte table) skips
- * text where no match can start.  Everything is iterative, so neither
- * deeply nested patterns nor long subjects can exhaust the C stack.
+ * text where no match can start; patterns that are plain strings are
+ * found with memchr/memcmp or KMP.  Matching is iterative, and recursion
+ * over the syntax tree is bounded by MAX_HEIGHT, so neither deeply nested
+ * patterns nor long subjects can exhaust the C stack.
  */
 #include "regex.h"
 #include "util.h"
@@ -478,7 +480,7 @@ static int unicode_class(const char *name, int len, Class *c, int neg, int icase
         R(' ', ' '); R(0xA0, 0xA0); R(0x2000, 0x200A); R(0x3000, 0x3000);
     } else if (IS("S") || IS("Sm") || IS("So")) {
         R('$', '$'); R('+', '+'); R('<', '>'); R('^', '^'); R('|', '|'); R('~', '~');
-        R(0x2190, 0x2BFF);
+        R(0x2190, 0x2BFF); R(0xFFFC, 0xFFFD); /* U+FFFD: what invalid bytes read as */
     } else {
         /* other scripts and categories: approximated as "any non-ASCII" */
         R(0x80, MAX_CP);
