@@ -134,17 +134,20 @@ int opt_parse(int id, const char *value, OptVal *out, char **err) {
     case OT_INT: {
         char *end;
         double v = strtod(value, &end);
+        int iv;
         if (end == value || *end || v != v || v > OPT_INT_MAX || v < -OPT_INT_MAX) {
             if (err) *err = xstrdup("Invalid value");
             return -1;
         }
-        if (id == O_TABSIZE && v > TABSIZE_MAX) {
+        /* check the value that is stored: 0.5 truncates to 0 */
+        iv = (int)v;
+        if (id == O_TABSIZE && iv > TABSIZE_MAX) {
             if (err) *err = xsprintf("tabsize must be at most %d", TABSIZE_MAX);
             return -1;
         }
-        if (d->nonneg == 1 && v < 0) { if (err) *err = xsprintf("%s must be non-negative", d->name); return -1; }
-        if (d->nonneg == 2 && v <= 0) { if (err) *err = xsprintf("%s must be positive", d->name); return -1; }
-        out->i = (int)v;
+        if (d->nonneg == 1 && iv < 0) { if (err) *err = xsprintf("%s must be non-negative", d->name); return -1; }
+        if (d->nonneg == 2 && iv <= 0) { if (err) *err = xsprintf("%s must be positive", d->name); return -1; }
+        out->i = iv;
         return 0;
     }
     default:
