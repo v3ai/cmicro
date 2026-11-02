@@ -4,3 +4,5 @@ micro.exe
 *.o
 tests/syntax_regex_test
 __pycache__/
+tests/io_test
+tests/io_test_asan
