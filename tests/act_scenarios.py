@@ -571,6 +571,21 @@ def bind_duplicate_keys(t, env):
     assert pairs == [("Ctrl-x", "Paste")], pairs
 
 
+@with_env(files={"a.txt": "xx ÉCOLE yy\nk K\nS ſ\n"},
+          settings='{"ignorecase": true}')
+@with_args("a.txt")
+def find_ignorecase_unicode_fold(t, env):
+    """Find with ignorecase folds like the regex (and replace) does:
+    Unicode simple folding, also for plain-string patterns"""
+    for pat, rep in (("école", "1"), ("K", "2"), ("k", "3"), ("s", "4"), ("ſ", "5")):
+        t.send(CTRL("f"), 0.1)
+        t.send(pat.encode(), 0.1)
+        t.send(ENTER, 0.2)
+        t.send(rep.encode(), 0.1)  # replaces the found (selected) text
+    got = save_and_read(t, env, "a.txt")
+    assert got == b"xx 1 yy\n2 3\n4 5\n", got
+
+
 SCENARIOS = [rebind_running_key, replace_dollar_overflow, goto_huge_numbers,
              replaceall_empty_matches, replace_interactive_quit, multicursor_edits,
              autocomplete_then_edit, macro_with_quit_and_prompt, long_command_binding,
@@ -579,7 +594,8 @@ SCENARIOS = [rebind_running_key, replace_dollar_overflow, goto_huge_numbers,
              replaceall_results, replaceall_groups, replaceall_empty_pattern, replaceall_selection,
              replace_interactive_results, tabsize_fraction, wheel_closes_other_pane,
              nul_lines_move_dup, duplicate_selection_lines, autocomplete_cycle, smartpaste,
-             open_over_unnamed_save, bind_unreadable_bindings, bind_duplicate_keys]
+             open_over_unnamed_save, bind_unreadable_bindings, bind_duplicate_keys,
+             find_ignorecase_unicode_fold]
 
 if __name__ == "__main__":
     only = os.environ.get("ONLY")

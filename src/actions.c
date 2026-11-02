@@ -405,9 +405,27 @@ static Regex *get_search_re(Buffer *b, const char *pat, int regex, char **err) {
     free(search_cache_fold);
     search_cache_fold = NULL;
     if (search_cache && *pat && ((flags & RE_LITERAL) || !strpbrk(pat, "\\.+*?()|[]{}^$"))) {
-        search_cache_lit = flags & RE_ICASE ? 2 : 1;
+        const char *u;
+        int ascii = 1, ascii_fold = 1, exact = 1, plen = (int)strlen(pat), n, cp;
+        for (u = pat; *u; u++) {
+            unsigned char c = (unsigned char)*u;
+            if (c >= 0x80) ascii = 0;
+            /* Unicode simple folding takes k and s out of ASCII
+               (U+212A KELVIN SIGN, U+017F LATIN SMALL LETTER LONG S) */
+            else if (c == 'k' || c == 'K' || c == 's' || c == 'S') ascii_fold = 0;
+        }
+        /* the regex reads an invalid byte as U+FFFD, which then matches
+           any invalid byte or a real U+FFFD: memcmp can't do that */
+        for (u = pat; *u; u += n) {
+            n = utf8_decode(u, plen - (int)(u - pat), &cp);
+            if (cp == 0xFFFD) { exact = 0; break; }
+        }
+        if (flags & RE_ICASE) search_cache_lit = ascii && ascii_fold ? 2 : 0;
+        else search_cache_lit = exact ? 1 : 0;
         if (search_cache_lit == 2) {
-            /* the regex engine folds ASCII letters only; so do we */
+            /* the pattern is ASCII without k/s, so the regex engine's
+               Unicode simple case folding stays within ASCII: fold
+               ASCII letters only, as it does */
             char *q;
             search_cache_fold = xstrdup(pat);
             for (q = search_cache_fold; *q; q++)
