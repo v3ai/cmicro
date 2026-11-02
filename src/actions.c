@@ -296,108 +296,23 @@ static void detect_clip_tool(void) {
     else if (plat_system("command -v pbcopy >/dev/null 2>&1") == 0) ext_tool = 4;
 }
 
-/* 64 unpredictable bits for temp file names: seeded once from the OS
-   entropy device where there is one (it is just a file to ISO C), mixed
-   with the clock and an address, then stepped with splitmix64. */
-static unsigned long long rand64(void) {
-    static unsigned long long state;
-    static int seeded;
-    unsigned long long z;
-    if (!seeded) {
-        FILE *f = plat_fopen("/dev/urandom", "rb");
-        unsigned char rb[8];
-        int i;
-        state = (unsigned long long)time(NULL) ^ ((unsigned long long)clock() << 32) ^
-                (unsigned long long)(size_t)&state ^ (unsigned long long)plat_now_ms();
-        if (f) {
-            if (fread(rb, 1, sizeof rb, f) == sizeof rb)
-                for (i = 0; i < 8; i++) state ^= (unsigned long long)rb[i] << (8 * i);
-            fclose(f);
-        }
-        seeded = 1;
-    }
-    z = (state += 0x9E3779B97F4A7C15ULL);
-    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
-    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
-    return z ^ (z >> 31);
-}
-
-static char *private_tmp; /* POSIX: a mode 0700 directory of our own */
-
-static void private_tmp_cleanup(void) {
-    if (private_tmp) plat_remove(private_tmp); /* empty by now */
-    free(private_tmp);
-    private_tmp = NULL;
-}
-
-/* ISO C can't set file permissions, so on POSIX the files go into a
-   directory the shell creates with umask 077 (mkdir fails rather than
-   reuse anything already there): other users can't read clipboard or
-   filter text while it sits on disk. */
-static char *temp_dir_for(int posix) {
-    static int tried;
-    char *dir = plat_temp_dir();
-    if (!posix) return dir;
-    if (!tried) {
-        char *path, *q, *cmd;
-        unsigned long long r = rand64();
-        tried = 1;
-        path = xsprintf("%s/micro-%08lx%08lx", dir && *dir ? dir : ".",
-                        (unsigned long)(r >> 32) & 0xffffffffUL, (unsigned long)r & 0xffffffffUL);
-        q = plat_shell_quote(path);
-        cmd = q ? xsprintf("umask 077 && mkdir %s 2>/dev/null", q) : NULL;
-        if (cmd && plat_system(cmd) == 0) {
-            private_tmp = path;
-            path = NULL;
-            atexit(private_tmp_cleanup);
-        }
-        free(cmd);
-        free(q);
-        free(path);
-    }
-    if (private_tmp && plat_is_dir(private_tmp)) {
-        free(dir);
-        return xstrdup(private_tmp);
-    }
-    return dir;
-}
-
-/* Create a new, empty temporary file and return its malloc'd path (NULL on
-   failure).  The name is unpredictable and, on POSIX systems, the file is
-   created exclusively (fopen "x" = O_CREAT|O_EXCL), so a file or symlink
-   planted in the shared temp directory is never opened, truncated or
-   followed (on POSIX inside a private 0700 directory, see temp_dir_for).
-   Optionally fills it with `data`.  Used by the clipboard tools
-   here and by `run`/`textfilter` in commands.c. */
+/* Create a new temporary file (mode 0600 on POSIX, created exclusively
+   with an unpredictable name by plat_temp_file) and return its malloc'd
+   path, NULL on failure.  Optionally fills it with `data`.  Used by the
+   clipboard tools here and by `run`/`textfilter` in commands.c. */
 char *act_tmpfile_create(const char *tag, const char *data, int len) {
-    int posix = !strcmp(plat_null_device(), "/dev/null");
-    char *dir = temp_dir_for(posix);
-    int tries;
-    for (tries = 0; tries < 16; tries++) {
-        unsigned long long r1 = rand64(), r2 = rand64();
-        char *path = xsprintf("%s%smicro-%s-%08lx%08lx%08lx%08lx", dir && *dir ? dir : ".",
-                              dir && *dir && plat_is_sep((unsigned char)dir[strlen(dir) - 1]) ? "" : "/",
-                              tag, (unsigned long)(r1 >> 32) & 0xffffffffUL,
-                              (unsigned long)r1 & 0xffffffffUL, (unsigned long)(r2 >> 32) & 0xffffffffUL,
-                              (unsigned long)r2 & 0xffffffffUL);
-        /* Windows: %TEMP% is per user and its C library may not know "x" */
-        FILE *f = plat_fopen(path, posix ? "wbx" : "wb");
-        if (f) {
-            int ok = 1;
-            if (data && len > 0 && fwrite(data, 1, (size_t)len, f) != (size_t)len) ok = 0;
-            if (fclose(f) != 0) ok = 0;
-            if (ok) {
-                free(dir);
-                return path;
-            }
-            plat_remove(path);
-            free(path);
-            break;
-        }
+    char *path = NULL;
+    FILE *f = plat_temp_file(tag, &path);
+    int ok;
+    if (!f) return NULL;
+    ok = !(data && len > 0 && fwrite(data, 1, (size_t)len, f) != (size_t)len);
+    if (fclose(f) != 0) ok = 0;
+    if (!ok) {
+        plat_remove(path);
         free(path);
+        return NULL;
     }
-    free(dir);
-    return NULL;
+    return path;
 }
 
 void clipboard_set(const char *s, int len, int lines) {
