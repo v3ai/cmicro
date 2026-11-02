@@ -536,6 +536,18 @@ def smartpaste(t, env):
 
 
 
+@with_env(files={"b.txt": "BBB\n"})
+def open_over_unnamed_save(t, env):
+    """open + 'save changes? y' on an unnamed buffer must save *that* text"""
+    t.send(b"hello", 0.1)
+    cmd(t, "open b.txt", 0.3)
+    t.send(b"y", 0.3)            # -> Filename: prompt
+    t.send(b"saved.txt\r", 0.4)
+    with open(os.path.join(env.dir, "saved.txt"), "rb") as f:
+        got = f.read()
+    assert got == b"hello\n" or got == b"hello", got
+
+
 SCENARIOS = [rebind_running_key, replace_dollar_overflow, goto_huge_numbers,
              replaceall_empty_matches, replace_interactive_quit, multicursor_edits,
              autocomplete_then_edit, macro_with_quit_and_prompt, long_command_binding,
@@ -543,7 +555,8 @@ SCENARIOS = [rebind_running_key, replace_dollar_overflow, goto_huge_numbers,
              paste_binary, mouse_ops, saveas_quit_prompt, find_prompt_ops, command_parsing,
              replaceall_results, replaceall_groups, replaceall_empty_pattern, replaceall_selection,
              replace_interactive_results, tabsize_fraction, wheel_closes_other_pane,
-             nul_lines_move_dup, duplicate_selection_lines, autocomplete_cycle, smartpaste]
+             nul_lines_move_dup, duplicate_selection_lines, autocomplete_cycle, smartpaste,
+             open_over_unnamed_save]
 
 if __name__ == "__main__":
     only = os.environ.get("ONLY")

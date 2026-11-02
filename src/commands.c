@@ -765,8 +765,10 @@ typedef struct {
 static void open_yn(int yes, int canceled, void *data) {
     OpenCtx *o = data;
     if (!canceled) {
-        if (yes) save_pane(o->p, 0);
-        open_into(o->p, o->path);
+        /* if the save didn't happen now (it asks for a file name, or for
+           sudo, or failed), opening would discard the unsaved text - or the
+           pending save would write the newly opened buffer instead */
+        if (!yes || save_pane(o->p, 0)) open_into(o->p, o->path);
     }
     free(o->path);
     free(o);
@@ -779,7 +781,7 @@ static void reopen_yn(int yes, int canceled, void *data) {
     Pane *p = data;
     char *err = NULL;
     if (canceled) return;
-    if (yes) save_pane(p, 0);
+    if (yes && !save_pane(p, 0)) return; /* not saved: don't throw the changes away */
     if (buf_reload(p->buf, &err) != 0) {
         editor_set_error("%s", err);
         free(err);
