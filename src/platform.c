@@ -617,10 +617,18 @@ PlatSave *plat_save_open(const char *path, long long size, int flags, int *denie
         char *tmp = temp_name_for(s->dest);
         int fd = tmp ? mkstemp(tmp) : -1;
         if (fd >= 0) {
-            int ok;
-            if (priv) {
+            int ok = 1;
+#ifdef __linux__
+            /* mkstemp gave the file the directory's default ACL, if it has
+               one; drop it.  The original's own ACL, if any, is copied back
+               by copy_xattrs below, and a state file stays owner-only. */
+            if (fremovexattr(fd, "system.posix_acl_access") != 0 && errno != ENODATA &&
+                errno != ENOTSUP && errno != EOPNOTSUPP)
+                ok = 0;
+#endif
+            if (ok && priv) {
                 ok = fchmod(fd, 0600) == 0;
-            } else {
+            } else if (ok) {
                 ok = fchmod(fd, st.st_mode & 07777) == 0;
                 /* keep the group; if we can't, don't change the file's group */
                 if (ok) {

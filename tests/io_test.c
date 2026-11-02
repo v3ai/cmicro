@@ -336,6 +336,41 @@ static void test_save_paths(void) {
     }
     unlink(p);
 
+    /* a directory's default ACL is not inherited by the replacement:
+       the saved file keeps having no ACL, and a state file stays
+       owner-only */
+    {
+        char *ad = tpath("acldir"), *ap = xsprintf("%s/f", ad), v[64];
+        /* POSIX ACL xattr v2: user::rw- user:12345:rw- group::--- mask::rw- other::--- */
+        static const unsigned char acl[] = {
+            2, 0, 0, 0,
+            0x01, 0, 6, 0, 0xff, 0xff, 0xff, 0xff,
+            0x02, 0, 6, 0, 0x39, 0x30, 0, 0,
+            0x04, 0, 0, 0, 0xff, 0xff, 0xff, 0xff,
+            0x10, 0, 6, 0, 0xff, 0xff, 0xff, 0xff,
+            0x20, 0, 0, 0, 0xff, 0xff, 0xff, 0xff,
+        };
+        CHECK(mkdir(ad, 0700) == 0);
+        write_raw(ap, "original\n", 9);
+        chmod(ap, 0640);
+        if (setxattr(ad, "system.posix_acl_default", acl, sizeof acl, 0) == 0) {
+            CHECK(buf_save(b, ap, &err) == 0);
+            CHECK(read_is(ap, "new\n"));
+            CHECK(file_mode(ap) == 0640);
+            CHECK(getxattr(ap, "system.posix_acl_access", v, sizeof v) < 0 && errno == ENODATA);
+            unlink(ap);
+            CHECK(buf_write_file(b, ap, PLAT_SAVE_PRIVATE, &err) == 0);
+            CHECK(file_mode(ap) == 0600);
+            CHECK(getxattr(ap, "system.posix_acl_access", v, sizeof v) < 0 && errno == ENODATA);
+        } else {
+            fprintf(stderr, "  default ACL test skipped: %s\n", strerror(errno));
+        }
+        unlink(ap);
+        rmdir(ad);
+        free(ap);
+        free(ad);
+    }
+
     /* a bind-mounted file can't be renamed over (EBUSY): it is
        rewritten in place instead (needs root and mount namespaces) */
     if (geteuid() == 0) {
