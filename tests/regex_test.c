@@ -254,6 +254,26 @@ int main(void) {
     a[200000 - 13] = 'a';
     t("(?:a|b)*a(?:a|b){12}", 0, a, -1, 0, "0 200000");
     t("(a|b)*a(a|b){12}$", 0, a, -1, 0, "0 200000 199986 199987 199999 200000");
+    a[200000 - 13] = 'b';
+    a[200000 - 17] = 'a';
+    t("(?:a|b)*a(?:a|b){16}", 0, a, -1, 0, "0 200000");  /* 2^17 states: cache flushes */
+    t("[ab]*?a[ab]{16}$", 0, a, -1, 0, "0 200000");
+    t("a[ab]{16}$", 0, a, -1, 0, "199983 200000");
+    {
+        /* random a/b text: the DFA really has ~2^17 states, so its cache
+           is flushed over and over; the result must not change */
+        unsigned x = 12345;
+        int last_a = -1;
+        char want[64];
+        for (i = 0; i < 200000; i++) {
+            x = x * 1103515245u + 12345u;
+            a[i] = (x >> 16) & 1 ? 'a' : 'b';
+            if (a[i] == 'a' && i + 16 < 200000) last_a = i;
+        }
+        sprintf(want, "0 %d", last_a + 17);
+        t("(?:a|b)*a(?:a|b){16}", 0, a, -1, 0, want);
+        t("(?:a|b)*a(?:a|b){16}", RE_LITERAL, a, -1, 0, "");
+    }
     free(a);
     if (now() - t0 > 20) {
         printf("FAIL long lines took %.1f s\n", now() - t0);
