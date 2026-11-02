@@ -7,7 +7,8 @@
  * Like Go, re_compile refuses a pattern that is not valid UTF-8 (also with
  * RE_LITERAL), and a surrogate such as \x{D800} never matches.
  * Matching uses lazily built DFAs plus a Pike VM for submatches, so a search
- * takes O(prog * text) time at worst, needs no recursion, and keeps a bounded
+ * takes O(prog * text) time at worst (filling k capture groups beyond the
+ * whole match costs up to O(prog * text * k)), needs no recursion, and keeps a bounded
  * cache of DFA states (1 MB per direction for typical patterns) inside the
  * Regex.  A Regex is therefore not thread-safe:
  * re_search updates that cache.
