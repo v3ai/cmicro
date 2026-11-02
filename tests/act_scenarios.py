@@ -457,6 +457,28 @@ def replaceall_selection(t, env):
     assert got == b"abb\nbaa\naaa\n", got
 
 
+@with_env(files={"a.txt": "foobar\nfoobar\nfooo\nfoo.bar\nfoo\nfoobar\nfoobar\na.b.c\na\u00e9\na\u00e9\n"})
+@with_args("a.txt")
+def replaceall_selection_edges(t, env):
+    """like micro, the range end sees the next character ($ and \\b don't
+    match there unless the text really ends), and the range start sees
+    the previous one"""
+    cases = [  # (line, selection start, length, args)
+        (1, 0, 3, "'o$' X"), (2, 0, 3, "'o\\b' X"), (3, 0, 3, "'o+' X"),
+        (4, 0, 3, "'o\\b' X"), (5, 0, 3, "'o$' X"), (6, 3, 3, "'^b' X"),
+        (7, 3, 3, "'\\bb' X"), (8, 0, 3, "-l . X"), (9, 0, 1, "'a$' X"),
+        (10, 0, 1, "a X"),
+    ]
+    for line, x, n, args in cases:
+        cmd(t, "goto %d" % line)
+        t.send(HOME + RIGHT * x, 0.02)
+        t.send(SHIFT(RIGHT) * n, 0.05)
+        cmd(t, "replaceall " + args)
+    got = save_and_read(t, env, "a.txt")
+    assert got == (b"foobar\nfoobar\nfXo\nfoX.bar\nfoX\nfoobar\nfoobar\naXb.c\n"
+                   b"a\xc3\xa9\nX\xc3\xa9\n"), got
+
+
 @with_env(files={"a.txt": "a1\na2\na3\n"})
 @with_args("a.txt")
 def replace_interactive_results(t, env):
@@ -592,6 +614,7 @@ SCENARIOS = [rebind_running_key, replace_dollar_overflow, goto_huge_numbers,
              textfilter_and_run, splits_tabs_quit_chain, comment_edge, huge_tabsize,
              paste_binary, mouse_ops, saveas_quit_prompt, find_prompt_ops, command_parsing,
              replaceall_results, replaceall_groups, replaceall_empty_pattern, replaceall_selection,
+             replaceall_selection_edges,
              replace_interactive_results, tabsize_fraction, wheel_closes_other_pane,
              nul_lines_move_dup, duplicate_selection_lines, autocomplete_cycle, smartpaste,
              open_over_unnamed_save, bind_unreadable_bindings, bind_duplicate_keys,
