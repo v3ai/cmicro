@@ -44,6 +44,49 @@ int autocomplete_suggestions(Pane *p, char ***out, int *idx) {
 #define CUR (ACUR(p))
 #define BUF (p->buf)
 
+/* pane_merge_cursors() compares every pair of cursors; with thousands of
+   cursors (SpawnMultiCursorSelect on a big selection) that dominated every
+   keystroke.  Same result (the earliest cursor of each location survives,
+   order is kept, the active cursor follows its survivor) in O(n log n). */
+static const Cursor *merge_base;
+static int merge_cmp(const void *a, const void *b) {
+    int ia = *(const int *)a, ib = *(const int *)b;
+    int c = loc_cmp(merge_base[ia].loc, merge_base[ib].loc);
+    return c ? c : (ia > ib) - (ia < ib);
+}
+
+static void merge_cursors(Pane *p) {
+    int n = p->ncur, i, k, *idx;
+    unsigned char *drop;
+    if (n < 32) {
+        pane_merge_cursors(p);
+        return;
+    }
+    idx = xmalloc(sizeof *idx * (size_t)n);
+    drop = xcalloc((size_t)n, 1);
+    for (i = 0; i < n; i++) idx[i] = i;
+    merge_base = p->cur;
+    qsort(idx, (size_t)n, sizeof *idx, merge_cmp);
+    for (i = 1; i < n; i++) {
+        if (loc_cmp(p->cur[idx[i]].loc, p->cur[idx[i - 1]].loc) == 0) {
+            int keep = idx[i - 1];
+            /* idx[i - 1] holds the lowest index of this location (ties sort by index) */
+            drop[idx[i]] = 1;
+            if (p->active == idx[i]) p->active = keep;
+            idx[i] = keep;
+        }
+    }
+    for (i = k = 0; i < n; i++) {
+        if (drop[i]) continue;
+        if (p->active == i) p->active = k;
+        p->cur[k++] = p->cur[i];
+    }
+    p->ncur = k > 0 ? k : 1;
+    if (p->active >= p->ncur) p->active = p->ncur - 1;
+    free(idx);
+    free(drop);
+}
+
 static int readonly_check(Pane *p) {
     if (BOPT(BUF, O_READONLY)) {
         editor_set_message("Warning: file is readonly");
@@ -253,11 +296,67 @@ static void detect_clip_tool(void) {
     else if (plat_system("command -v pbcopy >/dev/null 2>&1") == 0) ext_tool = 4;
 }
 
-static char *tmp_path(void) {
-    char *dir = plat_temp_dir(), *r;
-    r = xsprintf("%s/micro-clip-%ld-%d", dir ? dir : ".", (long)time(NULL), rand());
+/* 64 unpredictable bits for temp file names: seeded once from the OS
+   entropy device where there is one (it is just a file to ISO C), mixed
+   with the clock and an address, then stepped with splitmix64. */
+static unsigned long long rand64(void) {
+    static unsigned long long state;
+    static int seeded;
+    unsigned long long z;
+    if (!seeded) {
+        FILE *f = plat_fopen("/dev/urandom", "rb");
+        unsigned char rb[8];
+        int i;
+        state = (unsigned long long)time(NULL) ^ ((unsigned long long)clock() << 32) ^
+                (unsigned long long)(size_t)&state ^ (unsigned long long)plat_now_ms();
+        if (f) {
+            if (fread(rb, 1, sizeof rb, f) == sizeof rb)
+                for (i = 0; i < 8; i++) state ^= (unsigned long long)rb[i] << (8 * i);
+            fclose(f);
+        }
+        seeded = 1;
+    }
+    z = (state += 0x9E3779B97F4A7C15ULL);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+/* Create a new, empty temporary file and return its malloc'd path (NULL on
+   failure).  The name is unpredictable and, on POSIX systems, the file is
+   created exclusively (fopen "x" = O_CREAT|O_EXCL), so a file or symlink
+   planted in the shared temp directory is never opened, truncated or
+   followed.  Optionally fills it with `data`.  Used by the clipboard tools
+   here and by `run`/`textfilter` in commands.c. */
+char *act_tmpfile_create(const char *tag, const char *data, int len) {
+    char *dir = plat_temp_dir();
+    int posix = !strcmp(plat_null_device(), "/dev/null");
+    int tries;
+    for (tries = 0; tries < 16; tries++) {
+        unsigned long long r1 = rand64(), r2 = rand64();
+        char *path = xsprintf("%s%smicro-%s-%08lx%08lx%08lx%08lx", dir && *dir ? dir : ".",
+                              dir && *dir && plat_is_sep((unsigned char)dir[strlen(dir) - 1]) ? "" : "/",
+                              tag, (unsigned long)(r1 >> 32) & 0xffffffffUL,
+                              (unsigned long)r1 & 0xffffffffUL, (unsigned long)(r2 >> 32) & 0xffffffffUL,
+                              (unsigned long)r2 & 0xffffffffUL);
+        /* Windows: %TEMP% is per user and its C library may not know "x" */
+        FILE *f = plat_fopen(path, posix ? "wbx" : "wb");
+        if (f) {
+            int ok = 1;
+            if (data && len > 0 && fwrite(data, 1, (size_t)len, f) != (size_t)len) ok = 0;
+            if (fclose(f) != 0) ok = 0;
+            if (ok) {
+                free(dir);
+                return path;
+            }
+            plat_remove(path);
+            free(path);
+            break;
+        }
+        free(path);
+    }
     free(dir);
-    return r;
+    return NULL;
 }
 
 void clipboard_set(const char *s, int len, int lines) {
@@ -271,18 +370,17 @@ void clipboard_set(const char *s, int len, int lines) {
         if (plat_clipboard_set(s, len) == 0) return; /* native (Windows) */
         detect_clip_tool();
         if (ext_tool > 0) {
-            char *tp = tmp_path(), *cmd;
-            FILE *f = plat_fopen(tp, "wb");
             static const char *cmds[] = {"", "wl-copy", "xclip -selection clipboard -i",
                                          "xsel --clipboard --input", "pbcopy"};
-            if (f) {
-                fwrite(s, 1, (size_t)len, f);
-                fclose(f);
-                cmd = xsprintf("%s < '%s' >/dev/null 2>&1", cmds[ext_tool], tp); /* POSIX only */
-                if (plat_system(cmd) != 0) { /* fall back to internal */ }
+            char *tp = act_tmpfile_create("clip", s, len);
+            char *q = tp ? plat_shell_quote(tp) : NULL;
+            if (q) {
+                char *cmd = xsprintf("%s < %s >/dev/null 2>&1", cmds[ext_tool], q); /* POSIX only */
+                if (plat_system(cmd) != 0) { /* the internal copy above still works */ }
                 free(cmd);
-                plat_remove(tp);
             }
+            if (tp) plat_remove(tp);
+            free(q);
             free(tp);
         }
     }
@@ -300,13 +398,16 @@ char *clipboard_get(int *len) {
         if (ext_tool > 0) {
             static const char *cmds[] = {"", "wl-paste --no-newline", "xclip -selection clipboard -o",
                                          "xsel --clipboard --output", "pbpaste"};
-            char *tp = tmp_path();
-            char *cmd = xsprintf("%s > '%s' 2>/dev/null", cmds[ext_tool], tp);
-            int rc = plat_system(cmd);
+            /* the tool writes into a file we created exclusively ourselves */
+            char *tp = act_tmpfile_create("clip", NULL, 0);
+            char *q = tp ? plat_shell_quote(tp) : NULL;
+            char *cmd = q ? xsprintf("%s > %s 2>/dev/null", cmds[ext_tool], q) : NULL;
+            int rc = cmd ? plat_system(cmd) : -1;
             long l = 0;
             char *data = rc == 0 ? read_file(tp, &l) : NULL;
             free(cmd);
-            plat_remove(tp);
+            free(q);
+            if (tp) plat_remove(tp);
             free(tp);
             if (data) {
                 *len = (int)l;
@@ -327,6 +428,10 @@ char *clipboard_get(int *len) {
 static Regex *search_cache;
 static char *search_cache_pat;
 static int search_cache_flags;
+static int search_cache_lit; /* pattern is a plain string: 1 exact, 2 ASCII case-insensitive */
+static char *search_cache_fold; /* lowercased pattern for search_cache_lit == 2 */
+
+static const char *mem_find(const char *hay, size_t hl, const char *needle, size_t nl);
 
 static Regex *get_search_re(Buffer *b, const char *pat, int regex, char **err) {
     int flags = (BOPT(b, O_IGNORECASE) ? RE_ICASE : 0) | (regex ? 0 : RE_LITERAL);
@@ -338,13 +443,64 @@ static Regex *get_search_re(Buffer *b, const char *pat, int regex, char **err) {
     search_cache = re_compile(pat, flags, err);
     search_cache_pat = search_cache ? xstrdup(pat) : NULL;
     search_cache_flags = flags;
+    /* searching a big file line by line is dominated by regex start-up per
+       line; a plain string is found with memchr/memcmp instead */
+    search_cache_lit = 0;
+    free(search_cache_fold);
+    search_cache_fold = NULL;
+    if (search_cache && *pat && ((flags & RE_LITERAL) || !strpbrk(pat, "\\.+*?()|[]{}^$"))) {
+        search_cache_lit = flags & RE_ICASE ? 2 : 1;
+        if (search_cache_lit == 2) {
+            /* the regex engine folds ASCII letters only; so do we */
+            char *q;
+            search_cache_fold = xstrdup(pat);
+            for (q = search_cache_fold; *q; q++)
+                if (*q >= 'A' && *q <= 'Z') *q = (char)(*q - 'A' + 'a');
+        }
+    }
     return search_cache;
+}
+
+/* re_search() for the cached search pattern, with the plain-string fast path */
+static int search_in(const Regex *re, const char *s, int len, int start, int *caps) {
+    if (re == search_cache && search_cache_lit == 1) {
+        size_t nl = strlen(search_cache_pat);
+        const char *f;
+        if (start < 0 || start > len) return 0;
+        f = mem_find(s + start, (size_t)(len - start), search_cache_pat, nl);
+        if (!f) return 0;
+        caps[0] = (int)(f - s);
+        caps[1] = caps[0] + (int)nl;
+        return 1;
+    }
+    if (re == search_cache && search_cache_lit == 2) {
+        const char *nd = search_cache_fold;
+        int nl = (int)strlen(nd), i, j;
+        unsigned char c0 = (unsigned char)nd[0], c0u = c0 >= 'a' && c0 <= 'z' ? (unsigned char)(c0 - 'a' + 'A') : c0;
+        if (start < 0) return 0;
+        for (i = start; i <= len - nl; i++) {
+            unsigned char h = (unsigned char)s[i];
+            if (h != c0 && h != c0u) continue;
+            for (j = 1; j < nl; j++) {
+                unsigned char a = (unsigned char)s[i + j];
+                if (a >= 'A' && a <= 'Z') a = (unsigned char)(a - 'A' + 'a');
+                if (a != (unsigned char)nd[j]) break;
+            }
+            if (j == nl) {
+                caps[0] = i;
+                caps[1] = i + nl;
+                return 1;
+            }
+        }
+        return 0;
+    }
+    return re_search(re, s, len, start, caps, 1);
 }
 
 static int line_find(Regex *re, const Line *ln, int from, int *ms, int *me) {
     int caps[2];
     if (from > ln->len) return 0;
-    if (!re_search(re, ln->s, ln->len, from, caps, 1)) return 0;
+    if (!search_in(re, ln->s, ln->len, from, caps)) return 0;
     *ms = caps[0];
     *me = caps[1];
     return 1;
@@ -353,7 +509,7 @@ static int line_find(Regex *re, const Line *ln, int from, int *ms, int *me) {
 /* last match in line with start < limit (limit = -1: anywhere) */
 static int line_find_last(Regex *re, const Line *ln, int limit, int *ms, int *me) {
     int pos = 0, found = 0, caps[2];
-    while (pos <= ln->len && re_search(re, ln->s, ln->len, pos, caps, 1)) {
+    while (pos <= ln->len && search_in(re, ln->s, ln->len, pos, caps)) {
         if (limit >= 0 && caps[0] >= limit) break;
         *ms = caps[0];
         *me = caps[1];
@@ -420,14 +576,18 @@ int search_find(Pane *p, const char *pat, int regex, Loc from, int down, Loc *ms
 
 void search_highlight_ranges(Pane *p, int y, unsigned char *mask, int len) {
     Buffer *b = p->buf;
-    Regex *re = get_search_re(b, b->last_search, b->last_search_regex, NULL);
-    const Line *ln = &b->lines[y];
+    Regex *re;
+    const Line *ln;
     int pos = 0, caps[2];
-    (void)len;
+    if (!b->last_search || y < 0 || y >= b->nlines) return;
+    re = get_search_re(b, b->last_search, b->last_search_regex, NULL);
+    ln = &b->lines[y];
     if (!re) return;
-    while (pos <= ln->len && re_search(re, ln->s, ln->len, pos, caps, 1)) {
+    if (len > ln->len) len = ln->len;
+    while (pos <= ln->len && search_in(re, ln->s, ln->len, pos, caps)) {
         if (caps[1] > caps[0]) {
-            memset(mask + caps[0], 1, (size_t)(caps[1] - caps[0]));
+            int a = caps[0] < 0 ? 0 : caps[0], z = caps[1] > len ? len : caps[1];
+            if (z > a) memset(mask + a, 1, (size_t)(z - a));
             pos = caps[1];
         } else {
             pos = caps[1] < ln->len ? utf8_next(ln->s, ln->len, caps[1]) : ln->len + 1;
@@ -518,7 +678,7 @@ int insert_rune(Pane *p, int r) {
         insert_rune_at_cursor(p, &p->cur[i], r);
     }
     p->active = saved;
-    pane_merge_cursors(p);
+    merge_cursors(p);
     macro_record(1, NULL, 0, r);
     return 1;
 }
@@ -948,7 +1108,7 @@ static int a_backspace(Pane *p) {
     if (cur_has_sel(c)) {
         delete_selection(p, c);
     } else if (c->loc.x > 0 || c->loc.y > 0) {
-        int ts = BOPT(b, O_TABSIZE), i, allsp = 1;
+        int ts = BOPT(b, O_TABSIZE) > 0 ? BOPT(b, O_TABSIZE) : 1, i, allsp = 1;
         const Line *ln = &b->lines[c->loc.y];
         Loc start;
         for (i = 0; i < c->loc.x; i++) if (ln->s[i] != ' ') { allsp = 0; break; }
@@ -988,6 +1148,7 @@ static int a_insert_tab(Pane *p) {
     if (cur_has_sel(c)) delete_selection(p, c);
     ind = buf_indent_string(b);
     tb = (int)strlen(ind);
+    if (tb < 1) { free(ind); ind = xstrdup(" "); tb = 1; } /* tabsize 0 */
     until = tb - (pane_visual_x(p, c->loc.y, c->loc.x) % tb);
     buf_insert(b, c->loc, ind, until);
     free(ind);
@@ -1089,27 +1250,54 @@ static int a_indent_line(Pane *p) {
     return 1;
 }
 
+/* is the text the last completion inserted still there, under the cursor?
+   (anything else, e.g. a reload from disk, makes the saved offsets stale) */
+static int ac_state_valid(Pane *p) {
+    Buffer *b = BUF;
+    const Line *ln;
+    const char *w;
+    int n;
+    if (ac_pane != p || ac_n <= 0 || ac_idx < 0 || ac_idx >= ac_n) return 0;
+    if (ac_start.y < 0 || ac_start.y >= b->nlines || ac_start.x < 0) return 0;
+    ln = &b->lines[ac_start.y];
+    w = ac_sugg[ac_idx];
+    n = ac_prefix + ac_inserted;
+    if (n < 0 || (int)strlen(w) != n || ac_start.x > ln->len - n) return 0;
+    if (memcmp(ln->s + ac_start.x, w, (size_t)n) != 0) return 0;
+    return loc_cmp(CUR->loc, loc_make(ac_start.x + n, ac_start.y)) == 0;
+}
+
+static void ac_switch(Pane *p, int dir) {
+    Buffer *b = BUF;
+    Cursor *c = CUR;
+    Loc a = loc_make(ac_start.x + ac_prefix, ac_start.y);
+    const char *w;
+    buf_remove(b, a, loc_make(a.x + ac_inserted, a.y));
+    ac_idx = (ac_idx + dir + ac_n) % ac_n;
+    w = ac_sugg[ac_idx];
+    ac_inserted = (int)strlen(w) - ac_prefix;
+    buf_insert(b, a, w + ac_prefix, ac_inserted);
+    c->loc = loc_make(a.x + ac_inserted, a.y);
+    cur_store_vx(p, c);
+}
+
 /* autocomplete from words in the buffer (micro's BufferComplete) */
 static int a_autocomplete(Pane *p) {
     Buffer *b = BUF;
     Cursor *c = CUR;
     int x, start, y, i;
+    size_t plen;
     char *prefix;
     if (cur_has_sel(c)) return 0;
     if (ac_pane == p && ac_n > 0) {
-        /* cycle forward */
-        char *cur = ac_sugg[ac_idx];
-        Loc a = loc_make(ac_start.x + ac_prefix, ac_start.y);
-        ac_idx = (ac_idx + 1) % ac_n;
-        buf_remove(b, a, loc_make(a.x + ac_inserted, a.y));
-        (void)cur;
-        cur = ac_sugg[ac_idx];
-        ac_inserted = (int)strlen(cur) - ac_prefix;
-        buf_insert(b, a, cur + ac_prefix, ac_inserted);
-        c->loc = loc_make(a.x + ac_inserted, a.y);
-        cur_store_vx(p, c);
-        return 1;
+        if (ac_state_valid(p)) {
+            if (readonly_check(p)) return 0;
+            ac_switch(p, 1); /* cycle forward */
+            return 1;
+        }
+        ac_clear();
     }
+    if (BOPT(b, O_READONLY)) return 0; /* let Tab fall through to the next action */
     x = c->loc.x;
     if (x == 0) return 0;
     {
@@ -1120,6 +1308,7 @@ static int a_autocomplete(Pane *p) {
     while (start > 0 && is_word_char(char_before(p, loc_make(start, c->loc.y))))
         start = utf8_prev(b->lines[c->loc.y].s, start);
     prefix = xstrndup(b->lines[c->loc.y].s + start, (size_t)(x - start));
+    plen = (size_t)(x - start);
     ac_clear();
     /* scan the buffer from the cursor outwards so nearer words come first */
     for (i = 0; i < b->nlines; i++) {
@@ -1139,10 +1328,10 @@ static int a_autocomplete(Pane *p) {
                         if (!is_word_char(c2)) break;
                         e += n2;
                     }
-                    if (e - pos > (int)strlen(prefix) && !strncmp(ln->s + pos, prefix, strlen(prefix)) &&
+                    if ((size_t)(e - pos) > plen && !memcmp(ln->s + pos, prefix, plen) &&
                         !(y == c->loc.y && pos == start)) {
                         char *w = xstrndup(ln->s + pos, (size_t)(e - pos));
-                        for (j = 0; j < ac_n; j++) if (!strcmp(ac_sugg[j], w)) dup = 1;
+                        for (j = 0; j < ac_n; j++) if (!strcmp(ac_sugg[j], w)) { dup = 1; break; }
                         if (!dup) {
                             ac_sugg = xrealloc(ac_sugg, sizeof *ac_sugg * (size_t)(ac_n + 1));
                             ac_sugg[ac_n++] = w;
@@ -1172,17 +1361,10 @@ static int a_autocomplete(Pane *p) {
 }
 
 static int a_cycle_autocomplete_back(Pane *p) {
-    Buffer *b = BUF;
-    Cursor *c = CUR;
-    Loc a;
     if (ac_pane != p || ac_n == 0) return 0;
-    a = loc_make(ac_start.x + ac_prefix, ac_start.y);
-    buf_remove(b, a, loc_make(a.x + ac_inserted, a.y));
-    ac_idx = (ac_idx - 1 + ac_n) % ac_n;
-    ac_inserted = (int)strlen(ac_sugg[ac_idx]) - ac_prefix;
-    buf_insert(b, a, ac_sugg[ac_idx] + ac_prefix, ac_inserted);
-    c->loc = loc_make(a.x + ac_inserted, a.y);
-    cur_store_vx(p, c);
+    if (!ac_state_valid(p)) { ac_clear(); return 0; }
+    if (readonly_check(p)) return 0;
+    ac_switch(p, -1);
     return 1;
 }
 
@@ -1415,13 +1597,13 @@ static int a_center(Pane *p) {
 
 static int a_undo(Pane *p) {
     if (buf_undo(BUF)) editor_set_message("Undid action");
-    pane_merge_cursors(p);
+    merge_cursors(p);
     cur_store_vx(p, CUR);
     return 1;
 }
 static int a_redo(Pane *p) {
     if (buf_redo(BUF)) editor_set_message("Redid action");
-    pane_merge_cursors(p);
+    merge_cursors(p);
     cur_store_vx(p, CUR);
     return 1;
 }
@@ -1522,42 +1704,58 @@ static int a_cut_line(Pane *p) {
     return 1;
 }
 
+/* first occurrence of needle in hay (both may contain NUL bytes) */
+static const char *mem_find(const char *hay, size_t hl, const char *needle, size_t nl) {
+    const char *p = hay, *end = hay + hl;
+    if (nl == 0) return hay;
+    while ((size_t)(end - p) >= nl) {
+        p = memchr(p, needle[0], (size_t)(end - p) - nl + 1);
+        if (!p) return NULL;
+        if (!memcmp(p, needle, nl)) return p;
+        p++;
+    }
+    return NULL;
+}
+
+/* micro's smartpaste: re-indent pasted lines to the current line's
+   indentation.  Returns malloc'd text (or NULL to paste `clip` as is). */
+static char *smart_paste(Pane *p, Cursor *c, const char *clip, int len, int *outlen) {
+    Buffer *b = BUF;
+    int pl = 0, wl;
+    char *needle;
+    const char *lws, *s, *end = clip + len, *f;
+    Str o;
+    if (!BOPT(b, O_SMARTPASTE) || c->loc.x <= 0 || !memchr(clip, '\n', (size_t)len)) return NULL;
+    while (pl < len && (clip[pl] == ' ' || clip[pl] == '\t')) pl++;
+    if (pl == 1 && clip[0] == ' ') return NULL;
+    needle = xmalloc((size_t)pl + 1);
+    needle[0] = '\n';
+    memcpy(needle + 1, clip, (size_t)pl);
+    if (!mem_find(clip, (size_t)len, needle, (size_t)pl + 1)) {
+        free(needle);
+        return NULL;
+    }
+    lws = buf_leading_ws(b, c->loc.y, &wl);
+    str_init(&o);
+    str_reserve(&o, len);
+    for (s = clip + pl; (f = mem_find(s, (size_t)(end - s), needle, (size_t)pl + 1)) != NULL;
+         s = f + pl + 1) {
+        str_putn(&o, s, (int)(f - s));
+        str_putc(&o, '\n');
+        str_putn(&o, lws, wl);
+    }
+    str_putn(&o, s, (int)(end - s));
+    free(needle);
+    *outlen = o.len;
+    return str_detach(&o);
+}
+
 static void paste_text(Pane *p, Cursor *c, const char *clip, int len) {
     Buffer *b = BUF;
-    char *txt = xstrndup(clip, (size_t)len);
     int tl = len;
-    if (BOPT(b, O_SMARTPASTE) && c->loc.x > 0 && memchr(txt, '\n', (size_t)tl)) {
-        int pl = 0, wl;
-        while (pl < tl && (txt[pl] == ' ' || txt[pl] == '\t')) pl++;
-        if (!(pl == 1 && txt[0] == ' ')) {
-            char *pws = xstrndup(txt, (size_t)pl);
-            const char *lws = buf_leading_ws(b, c->loc.y, &wl);
-            char *needle = xsprintf("\n%s", pws);
-            if (strstr(txt, needle)) {
-                Str o;
-                char *s = txt + pl;
-                char *cws = xstrndup(lws, (size_t)wl);
-                str_init(&o);
-                str_reserve(&o, 0);
-                for (;;) {
-                    char *f = strstr(s, needle);
-                    if (!f) { str_puts(&o, s); break; }
-                    str_putn(&o, s, (int)(f - s));
-                    str_putc(&o, '\n');
-                    str_puts(&o, cws);
-                    s = f + strlen(needle);
-                }
-                free(txt);
-                txt = str_detach(&o);
-                tl = (int)strlen(txt);
-                free(cws);
-            }
-            free(needle);
-            free(pws);
-        }
-    }
+    char *txt = smart_paste(p, c, clip, len, &tl);
     if (cur_has_sel(c)) delete_selection(p, c);
-    buf_insert(b, c->loc, txt, tl);
+    buf_insert(b, c->loc, txt ? txt : clip, txt ? tl : len);
     free(txt);
     cur_store_vx(p, c);
     E.cut_line_streak = 0;
@@ -1574,14 +1772,14 @@ static int a_paste(Pane *p) {
         for (i = 0; i < len; i++) if (clip[i] == '\n') nl++;
         if (len > 0 && clip[len - 1] == '\n') nl--;
         if (nl == p->ncur) {
-            const char *s = clip;
+            const char *s = clip, *end = clip + len, *e;
             int k;
-            for (k = 0; k < p->active; k++) { s = strchr(s, '\n'); s = s ? s + 1 : clip + len; }
-            {
-                const char *e = strchr(s, '\n');
-                int l = e ? (int)(e - s) : (int)(clip + len - s);
-                paste_text(p, CUR, s, l);
+            for (k = 0; k < p->active && s < end; k++) {
+                e = memchr(s, '\n', (size_t)(end - s));
+                s = e ? e + 1 : end;
             }
+            e = memchr(s, '\n', (size_t)(end - s));
+            paste_text(p, CUR, s, e ? (int)(e - s) : (int)(end - s));
             free(clip);
             editor_set_message("Pasted clipboard");
             return 1;
@@ -1611,29 +1809,39 @@ static int a_duplicate(Pane *p) {
 static int a_duplicate_line(Pane *p) {
     Cursor *c = CUR;
     Buffer *b = BUF;
-    char *t;
     if (readonly_check(p)) return 0;
     if (cur_has_sel(c)) {
         Cursor save = *c;
         Loc s0 = c->sel[0], e = c->sel[1];
-        int y;
+        char *t, *nt;
+        int len;
         if (e.x == 0) e = buf_move_chars(b, e, -1);
+        /* one insertion of "\n" + lines s0.y..e.y after line e.y (inserting
+           line by line would shift the rest of the buffer once per line) */
+        t = buf_get_text(b, loc_make(0, s0.y), loc_make(b->lines[e.y].len, e.y), &len);
+        nt = xmalloc((size_t)len + 2);
+        nt[0] = '\n';
+        memcpy(nt + 1, t, (size_t)len + 1);
+        free(t);
         c->sel[0] = c->sel[1] = c->orig[0] = c->orig[1] = c->loc;
         c->loc = loc_make(b->lines[e.y].len, e.y);
-        for (y = s0.y; y <= e.y; y++) {
-            t = xsprintf("\n%s", b->lines[y].s);
-            buf_insert(b, c->loc, t, (int)strlen(t));
-            free(t);
-        }
+        buf_insert(b, c->loc, nt, len + 1);
+        free(nt);
         *c = save;
         if (s0.y < e.y) editor_set_message("Duplicated %d lines", e.y - s0.y + 1);
         else editor_set_message("Duplicated line");
         return 1;
     }
-    c->loc.x = b->lines[c->loc.y].len;
-    t = xsprintf("\n%s", b->lines[c->loc.y].s);
-    buf_insert(b, c->loc, t, (int)strlen(t));
-    free(t);
+    {
+        const Line *ln = &b->lines[c->loc.y];
+        int len = ln->len;
+        char *t = xmalloc((size_t)len + 1);
+        t[0] = '\n';
+        memcpy(t + 1, ln->s, (size_t)len);
+        c->loc.x = len;
+        buf_insert(b, c->loc, t, len + 1);
+        free(t);
+    }
     cur_store_vx(p, c);
     editor_set_message("Duplicated line");
     return 1;
@@ -1665,25 +1873,24 @@ static int move_lines(Pane *p, int up) {
         return 1;
     }
     save = *c;
+    /* the moved line is copied with its length: it may contain NUL bytes */
     if (up) {
-        t = xstrdup(b->lines[y0 - 1].s);
-        len = (int)strlen(t);
+        const Line *ln = &b->lines[y0 - 1];
+        len = ln->len;
+        t = xmalloc((size_t)len + 1);
+        t[0] = '\n';
+        memcpy(t + 1, ln->s, (size_t)len);
         buf_remove(b, loc_make(0, y0 - 1), loc_make(0, y0));
-        {
-            char *t2 = xsprintf("\n%s", t);
-            buf_insert(b, loc_make(b->lines[y1 - 1].len, y1 - 1), t2, len + 1);
-            free(t2);
-        }
+        buf_insert(b, loc_make(b->lines[y1 - 1].len, y1 - 1), t, len + 1);
         d = -1;
     } else {
-        t = xstrdup(b->lines[y1 + 1].s);
-        len = (int)strlen(t);
+        const Line *ln = &b->lines[y1 + 1];
+        len = ln->len;
+        t = xmalloc((size_t)len + 1);
+        memcpy(t, ln->s, (size_t)len);
+        t[len] = '\n';
         buf_remove(b, loc_make(b->lines[y1].len, y1), loc_make(b->lines[y1 + 1].len, y1 + 1));
-        {
-            char *t2 = xsprintf("%s\n", t);
-            buf_insert(b, loc_make(0, y0), t2, len + 1);
-            free(t2);
-        }
+        buf_insert(b, loc_make(0, y0), t, len + 1);
         d = 1;
     }
     free(t);
@@ -2029,7 +2236,7 @@ static int a_spawn_multi_cursor(Pane *p) {
         c->sel[1] = c->orig[1] = me;
         c->loc = me;
         p->active = i;
-        pane_merge_cursors(p);
+        merge_cursors(p);
     } else {
         editor_set_message("No matches found");
     }
@@ -2072,7 +2279,7 @@ static int spawn_vertical(Pane *p, int dir) {
     i = pane_add_cursor(p, tmp.loc); /* may realloc p->cur: don't touch `last` after */
     p->cur[i].lastvx = tmp.lastvx;
     p->active = i;
-    pane_merge_cursors(p);
+    merge_cursors(p);
     return 1;
 }
 static int a_spawn_multi_cursor_up(Pane *p) { return spawn_vertical(p, -1); }
@@ -2102,7 +2309,7 @@ static int a_skip_multi_cursor(Pane *p) {
         last->sel[0] = last->orig[0] = ms;
         last->sel[1] = last->orig[1] = me;
         last->loc = me;
-        pane_merge_cursors(p);
+        merge_cursors(p);
     } else editor_set_message("No matches found");
     free(sel);
     free(q);
@@ -2122,7 +2329,7 @@ static int a_skip_multi_cursor_back(Pane *p) {
         last->sel[0] = last->orig[0] = ms;
         last->sel[1] = last->orig[1] = me;
         last->loc = me;
-        pane_merge_cursors(p);
+        merge_cursors(p);
     } else editor_set_message("No matches found");
     free(sel);
     free(q);
@@ -2485,7 +2692,7 @@ static int run_one(Pane *p, const char *name) {
             ok = fn(p) && ok;
         }
         p->active = saved < p->ncur ? saved : p->ncur - 1;
-        pane_merge_cursors(p);
+        merge_cursors(p);
     } else {
         if (!action_is_multi(name) || p->ncur <= 1) {
             ok = fn(p);
@@ -2496,44 +2703,52 @@ static int run_one(Pane *p, const char *name) {
     return ok;
 }
 
+/* is p still a pane of some tab? (actions can close panes and tabs) */
+static int pane_alive(Pane *p) {
+    int i;
+    if (!p) return 0;
+    for (i = 0; i < E.ntabs; i++)
+        if (tab_find_node(E.tabs[i]->root, p)) return 1;
+    return 0;
+}
+
 int run_action_string(Pane *p, const char *acts, InEvent *ev) {
-    const char *s = acts;
-    int ok = 1;
+    /* work on a private copy: the string usually belongs to the bindings
+       table, and an action (e.g. "command:bind ...") may replace or free it */
+    char *copy = xstrdup(acts), *s = copy;
+    int ok = 1, tab0 = E.curtab, ntabs0 = E.ntabs;
     char sep = 0;
-    Tab *t0 = cur_tab();
     Pane *active0 = cur_pane();
     (void)ev;
     no_relocate = 0;
     while (*s) {
-        const char *e = s;
-        char name[256];
-        size_t n;
+        char *e = s, save;
         /* command: actions may contain separators; take the rest of the string */
         if (starts_with(s, "command:") || starts_with(s, "command-edit:")) {
             e = s + strlen(s);
         } else {
             while (*e && *e != ',' && *e != '|' && *e != '&') e++;
         }
-        n = (size_t)(e - s);
-        if (n >= sizeof name) n = sizeof name - 1;
-        memcpy(name, s, n);
-        name[n] = 0;
         if (sep == '&' && !ok) break;
         if (sep == '|' && ok) break;
         if (cur_pane() != active0) p = active0 = cur_pane(); /* an action switched panes */
+        else if (!pane_alive(p)) p = cur_pane();             /* ...or closed the target */
         if (!p) break;
+        save = *e;
+        *e = 0;
         {
             int had_prompt = prompt_active();
-            ok = run_one(p, name);
+            ok = run_one(p, s);
             /* an action opened a prompt: the rest of the chain must not run
                underneath it (it could close the pane the prompt refers to) */
-            if (!had_prompt && prompt_active()) break;
+            if (!had_prompt && prompt_active()) { save = 0; }
         }
-        if (!*e) break;
-        sep = *e;
+        if (E.quit || !save) break;
+        sep = save;
         s = e + 1;
     }
-    if (cur_pane() != active0) p = cur_pane();
-    if (p && !no_relocate && cur_tab() == t0) pane_relocate(p);
+    free(copy);
+    if (cur_pane() != active0 || !pane_alive(p)) p = cur_pane();
+    if (p && !no_relocate && E.curtab == tab0 && E.ntabs == ntabs0) pane_relocate(p);
     return ok;
 }

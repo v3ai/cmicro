@@ -19,44 +19,69 @@ int autocomplete_suggestions(Pane *p, char ***out, int *idx);
 /* ================================================================== */
 /* Shell helpers (ISO C plat_system())                                      */
 
-static char *tmpname(const char *tag) {
-    char *dir = plat_temp_dir(), *r;
-    r = xsprintf("%s/micro-%s-%ld-%d", dir ? dir : ".", tag, (long)time(NULL), rand());
-    free(dir);
-    return r;
-}
+char *act_tmpfile_create(const char *tag, const char *data, int len); /* actions.c */
 
-
-/* run cmd with optional stdin text; returns malloc'd combined output */
-static char *run_capture(const char *cmd, const char *input, int inlen, int *status) {
-    char *out = tmpname("out"), *in = NULL, *full, *data;
+/* run cmd with optional stdin text; returns malloc'd combined output (its
+   length in *outlen).  Both temp files are created exclusively with
+   unpredictable names before the shell sees them (see act_tmpfile_create),
+   so nothing planted in the temp directory is read, followed or clobbered. */
+static char *run_capture(const char *cmd, const char *input, int inlen, int *status, int *outlen) {
+    char *out = act_tmpfile_create("out", NULL, 0), *in = NULL, *full = NULL, *data = NULL;
     long len = 0;
-    int rc;
-    if (input) {
-        FILE *f;
-        in = tmpname("in");
-        f = plat_fopen(in, "wb");
-        if (f) {
-            fwrite(input, 1, (size_t)inlen, f);
-            fclose(f);
+    int rc = -1;
+    if (out && input) {
+        in = act_tmpfile_create("in", input, inlen);
+        if (!in) {
+            plat_remove(out);
+            free(out);
+            out = NULL;
         }
     }
-    full = plat_capture_cmd(cmd, in, out);
-    rc = full ? plat_system(full) : -1;
+    if (out) {
+        full = plat_capture_cmd(cmd, in, out);
+        rc = full ? plat_system(full) : -1;
+        data = read_file(out, &len);
+        plat_remove(out);
+    } else {
+        editor_set_error("Could not create a temporary file");
+    }
     if (status) *status = rc;
-    data = read_file(out, &len);
-    plat_remove(out);
     if (in) plat_remove(in);
     free(full);
     free(out);
     free(in);
-    if (data && plat_is_sep('\\')) {
-        /* Windows programs print CRLF */
-        char *r = data, *o = data;
-        for (; *r; r++) if (*r != '\r') *o++ = *r;
-        *o = 0;
+    if (!data) {
+        data = xstrdup("");
+        len = 0;
     }
-    return data ? data : xstrdup("");
+    if (plat_is_sep('\\')) {
+        /* Windows programs print CRLF */
+        long r, o = 0;
+        for (r = 0; r < len; r++) if (data[r] != '\r') data[o++] = data[r];
+        data[o] = 0;
+        len = o;
+    }
+    if (outlen) *outlen = (int)len;
+    return data;
+}
+
+/* the raw text after the command name, as the user typed it */
+static const char *cmd_rest(const char *line) {
+    while (*line == ' ' || *line == '\t') line++;
+    while (*line && *line != ' ' && *line != '\t') line++;
+    while (*line == ' ' || *line == '\t') line++;
+    return line;
+}
+
+/* strtol that saturates to [-1e9, 1e9] instead of overflowing (atoi has
+   undefined behaviour on out-of-range input); *end like strtol's */
+static int parse_int(const char *s, const char **end) {
+    char *e;
+    long v = strtol(s, &e, 10);
+    if (end) *end = e;
+    if (v > 1000000000L) v = 1000000000L;
+    if (v < -1000000000L) v = -1000000000L;
+    return (int)v;
 }
 
 void run_shell_interactive(const char *cmd) {
@@ -131,6 +156,11 @@ void set_option_cmd(Pane *p, const char *name, const char *value, int local) {
     if (opt_parse(id, value, &v, &err) != 0) {
         editor_set_error("%s", err);
         free(err);
+        return;
+    }
+    if (opt_defs[id].type == OT_INT && opt_defs[id].nonneg == 2 && v.i <= 0) {
+        /* e.g. "set tabsize 0.5" parses as 0, which the renderer divides by */
+        editor_set_error("%s must be positive", name);
         return;
     }
     if (id == O_COLORSCHEME) {
@@ -409,26 +439,31 @@ void apply_ftoptions(Buffer *b) {
 /* ================================================================== */
 /* Replace                                                             */
 
-static char *expand_repl(const char *repl, const char *line, const int *caps, int ncap, int literal) {
+static char *expand_repl(const char *repl, const char *line, const int *caps, int ncap, int literal, int *outlen) {
     Str o;
     const char *s = repl;
     str_init(&o);
     str_reserve(&o, 0);
     if (literal) {
         str_puts(&o, repl);
+        *outlen = o.len;
         return str_detach(&o);
     }
     while (*s) {
         if (*s == '$') {
             int g = -1;
             if (s[1] == '$') { str_putc(&o, '$'); s += 2; continue; }
+            /* group numbers saturate: "$99999999999" must not overflow */
             if (s[1] == '{') {
                 const char *e = strchr(s + 2, '}');
-                if (e && isdigit((unsigned char)s[2])) { g = atoi(s + 2); s = e + 1; }
+                if (e && isdigit((unsigned char)s[2])) { g = parse_int(s + 2, NULL); s = e + 1; }
             } else if (isdigit((unsigned char)s[1])) {
                 g = 0;
                 s++;
-                while (isdigit((unsigned char)*s)) g = g * 10 + (*s++ - '0');
+                while (isdigit((unsigned char)*s)) {
+                    if (g < 100000000) g = g * 10 + (*s - '0');
+                    s++;
+                }
             }
             if (g >= 0) {
                 if (g < ncap && caps[2 * g] >= 0) str_putn(&o, line + caps[2 * g], caps[2 * g + 1] - caps[2 * g]);
@@ -439,6 +474,7 @@ static char *expand_repl(const char *repl, const char *line, const int *caps, in
             str_putc(&o, *s++);
         }
     }
+    *outlen = o.len;
     return str_detach(&o);
 }
 
@@ -452,54 +488,63 @@ static int replace_all(Pane *p, const char *search, const char *repl, int litera
     Regex *re = compile_search(b, search, literal, &err);
     int y, count = 0, ncap;
     int *caps;
+    Str out;
     if (!re) {
         editor_set_error("%s", err);
         free(err);
         return -1;
     }
     ncap = re_ncaps(re);
+    if (ncap < 1) ncap = 1;
     caps = xmalloc(sizeof(int) * (size_t)(2 * ncap));
+    a = buf_clamp(b, a);
+    z = buf_clamp(b, z);
+    if (loc_cmp(a, z) > 0) { Loc t = a; a = z; z = t; }
+    str_init(&out);
     for (y = a.y; y <= z.y && y < b->nlines; y++) {
         Line *ln = &b->lines[y];
         int from = y == a.y ? a.x : 0;
         int to = y == z.y ? z.x : ln->len;
-        int pos = from, changed = 0;
-        Str out;
-        str_init(&out);
-        str_reserve(&out, 0);
-        str_putn(&out, ln->s, from);
+        int pos = from, first = -1, last = from;
+        str_clear(&out);
         while (pos <= to && re_search(re, ln->s, to, pos, caps, ncap)) {
-            char *r = expand_repl(repl, ln->s, caps, ncap, literal);
-            str_putn(&out, ln->s + pos, caps[0] - pos);
-            str_puts(&out, r);
+            char *r;
+            int rl;
+            if (caps[0] < pos || caps[1] < caps[0] || caps[1] > to) break; /* defensive */
+            if (caps[0] == caps[1] && first >= 0 && caps[0] == last) {
+                /* like Go's ReplaceAll: an empty match right after a match is skipped */
+                if (caps[1] >= to) break;
+                pos = utf8_next(ln->s, to, caps[1]);
+                continue;
+            }
+            if (first < 0) first = caps[0];
+            else str_putn(&out, ln->s + last, caps[0] - last);
+            r = expand_repl(repl, ln->s, caps, ncap, literal, &rl);
+            str_putn(&out, r, rl);
             free(r);
             count++;
-            changed = 1;
+            last = caps[1];
             if (caps[1] == caps[0]) {
-                if (caps[1] < to) {
-                    int nx = utf8_next(ln->s, to, caps[1]);
-                    str_putn(&out, ln->s + caps[1], nx - caps[1]);
-                    pos = nx;
-                } else {
-                    pos = to; /* the tail starting at `to` is copied below */
-                    break;
-                }
+                if (caps[1] >= to) break;
+                pos = utf8_next(ln->s, to, caps[1]); /* step over one character */
             } else {
                 pos = caps[1];
             }
         }
-        if (changed) {
-            int tail = pos < ln->len ? pos : ln->len;
-            str_putn(&out, ln->s + tail, ln->len - tail);
-            {
-                int newlen = out.len;
-                int delta = newlen - ln->len;
-                buf_replace(b, loc_make(0, y), loc_make(ln->len, y), out.s, out.len);
-                if (y == z.y) z.x += delta;
+        if (first >= 0) {
+            /* replace only the span from the first match to the end of the
+               last one: one edit per line, and the undo record stays small */
+            int rest = to - last; /* bytes between the last match and the range end */
+            Loc end = buf_replace(b, loc_make(first, y), loc_make(last, y), out.s ? out.s : "", out.len);
+            if (end.y != y) {
+                /* the replacement contained line breaks: skip the new lines */
+                z.y += end.y - y;
+                y = end.y;
             }
+            if (y == z.y) z.x = end.x + rest;
         }
-        str_free(&out);
     }
+    str_free(&out);
     free(caps);
     re_free(re);
     return count;
@@ -536,17 +581,35 @@ static void repl_answer(int yes, int canceled, void *data) {
     ReplCtx *r = data;
     Buffer *b = r->p->buf;
     if (canceled) { repl_finish(r); return; }
+    if (r->ms.y >= b->nlines || r->me.y >= b->nlines || r->me.x > b->lines[r->me.y].len) {
+        repl_finish(r); /* the buffer changed under the prompt */
+        return;
+    }
+    if (yes && BOPT(b, O_READONLY)) {
+        editor_set_message("Warning: file is readonly");
+        repl_finish(r);
+        return;
+    }
     if (yes) {
-        int ncap = re_ncaps(r->re), *caps = xmalloc(sizeof(int) * (size_t)(2 * ncap));
+        int ncap = re_ncaps(r->re), *caps, i;
         Line *ln = &b->lines[r->ms.y];
         char *rep;
+        int rl;
         Loc end;
-        re_search(r->re, ln->s, ln->len, r->ms.x, caps, ncap);
-        rep = expand_repl(r->repl, ln->s, caps, ncap, r->literal);
+        if (ncap < 1) ncap = 1;
+        caps = xmalloc(sizeof(int) * (size_t)(2 * ncap));
+        if (!re_search(r->re, ln->s, ln->len, r->ms.x, caps, ncap) || caps[0] != r->ms.x) {
+            for (i = 0; i < 2 * ncap; i++) caps[i] = -1; /* no captures: $n expand to "" */
+        }
+        rep = expand_repl(r->repl, ln->s, caps, ncap, r->literal, &rl);
         free(caps);
-        end = buf_replace(b, r->ms, r->me, rep, (int)strlen(rep));
-        if (r->origin.y == r->ms.y && r->origin.x > r->ms.x)
-            r->origin.x += (int)strlen(rep) - (r->me.x - r->ms.x);
+        end = buf_replace(b, r->ms, r->me, rep, rl);
+        if (r->origin.y == r->ms.y && r->origin.x > r->ms.x) {
+            if (end.y != r->ms.y) r->origin = loc_make(r->origin.x - r->me.x + end.x, end.y);
+            else r->origin.x += end.x - r->me.x;
+        } else if (r->origin.y > r->ms.y) {
+            r->origin.y += end.y - r->ms.y;
+        }
         free(rep);
         r->count++;
         r->pos = end;
@@ -602,6 +665,10 @@ static void cmd_replace(Pane *p, int argc, char **argv, int all) {
         editor_set_error("Not enough arguments");
         return;
     }
+    if (BOPT(p->buf, O_READONLY)) {
+        editor_set_message("Warning: file is readonly");
+        return;
+    }
     if (doall) {
         Cursor *c = ACUR(p);
         Loc a = loc_make(0, 0), z = buf_end(p->buf);
@@ -641,9 +708,9 @@ static void parse_cursor_spec(const char *s, int *line, int *col) {
     *line = -1;
     *col = -1;
     if (!s || !*s) return;
-    *line = atoi(s);
+    *line = parse_int(s, NULL);
     s = strchr(s, ':');
-    if (s) *col = atoi(s + 1);
+    if (s) *col = parse_int(s + 1, NULL);
 }
 
 static void goto_line_col(Pane *p, int line, int col) {
@@ -723,15 +790,22 @@ static void reopen_yn(int yes, int canceled, void *data) {
 static void retab(Pane *p) {
     Buffer *b = p->buf;
     int y, ts = BOPT(b, O_TABSIZE), spaces = BOPT(b, O_TABSTOSPACES);
+    if (BOPT(b, O_READONLY)) {
+        editor_set_message("Warning: file is readonly");
+        return;
+    }
+    if (ts < 1) ts = 1;
     for (y = 0; y < b->nlines; y++) {
         Line *ln = &b->lines[y];
-        int i = 0, vx = 0;
+        int i = 0;
+        long long vx = 0;
         Str ws;
         while (i < ln->len && (ln->s[i] == ' ' || ln->s[i] == '\t')) {
             vx += ln->s[i] == '\t' ? ts - vx % ts : 1;
             i++;
         }
         if (i == 0) continue;
+        if (vx > 1 << 24) continue; /* absurd tabsize: leave the line alone */
         str_init(&ws);
         str_reserve(&ws, 0);
         if (spaces) {
@@ -808,13 +882,14 @@ void command_run(Pane *p, const char *line) {
     } else if (!strcmp(cmd, "run")) {
         if (argc < 2) editor_set_error("Not enough arguments");
         else {
-            const char *rest = strstr(line, "run") + 3;
-            int st;
-            char *out, *q;
-            while (*rest == ' ') rest++;
-            out = run_capture(rest, NULL, 0, &st);
-            for (q = out; *q; q++) if (*q == '\n' || *q == '\r' || *q == '\t') *q = ' ';
-            while (q > out && q[-1] == ' ') *--q = 0;
+            const char *rest = cmd_rest(line);
+            int st, len, i;
+            char *out = run_capture(rest, NULL, 0, &st, &len);
+            /* one status line: line breaks, tabs and NULs become spaces
+               (other control characters are made visible by the screen) */
+            for (i = 0; i < len; i++)
+                if (out[i] == '\n' || out[i] == '\r' || out[i] == '\t' || out[i] == 0) out[i] = ' ';
+            while (len > 0 && out[len - 1] == ' ') out[--len] = 0;
             editor_set_message("%s", out);
             free(out);
         }
@@ -835,10 +910,12 @@ void command_run(Pane *p, const char *line) {
             if (!isdigit((unsigned char)a[0]) && a[0] != '-' && a[0] != '+') {
                 editor_set_error("Invalid line number");
             } else {
-                line_n = atoi(a);
-                if (colon) col = atoi(colon + 1);
+                /* parse_int saturates at +-1e9, so the sums below can't overflow */
+                line_n = parse_int(a, NULL);
+                if (colon) col = parse_int(colon + 1, NULL);
                 if (rel) line_n = ACUR(p)->loc.y + 1 + line_n;
                 else if (line_n < 0) line_n = p->buf->nlines + 1 + line_n;
+                if (line_n < 1) line_n = 1;
                 goto_line_col(p, line_n, col);
             }
         }
@@ -883,8 +960,8 @@ void command_run(Pane *p, const char *line) {
         else {
             int target, cur = E.curtab;
             Tab *t;
-            if (argv[1][0] == '+' || argv[1][0] == '-') target = cur + atoi(argv[1]);
-            else target = atoi(argv[1]) - 1;
+            if (argv[1][0] == '+' || argv[1][0] == '-') target = cur + parse_int(argv[1], NULL);
+            else target = parse_int(argv[1], NULL) - 1;
             target = clampi(target, 0, E.ntabs - 1);
             t = E.tabs[cur];
             if (target < cur) memmove(E.tabs + target + 1, E.tabs + target, sizeof *E.tabs * (size_t)(cur - target));
@@ -900,7 +977,7 @@ void command_run(Pane *p, const char *line) {
                 if (!strcmp(E.tabs[i]->active->buf->name, argv[1])) { E.curtab = i; found = 1; break; }
             }
             if (!found) {
-                int n = atoi(argv[1]);
+                int n = parse_int(argv[1], NULL);
                 if (n >= 1 && n <= E.ntabs) E.curtab = n - 1;
                 else editor_set_error("Invalid tab index");
             }
@@ -959,14 +1036,24 @@ void command_run(Pane *p, const char *line) {
         Cursor *c = ACUR(p);
         if (argc < 2) editor_set_error("usage: textfilter arguments");
         else if (!cur_has_sel(c)) editor_set_error("No selection");
+        else if (BOPT(p->buf, O_READONLY)) editor_set_message("Warning: file is readonly");
         else {
-            const char *rest = strstr(line, "textfilter") + 10;
-            int len, st;
+            const char *rest = cmd_rest(line);
+            int len, st, olen;
             char *sel = buf_get_text(p->buf, c->sel[0], c->sel[1], &len);
-            char *out = run_capture(rest, sel, len, &st);
-            Loc end = buf_replace(p->buf, c->sel[0], c->sel[1], out, (int)strlen(out));
-            c->loc = end;
-            c->sel[1] = c->orig[1] = end;
+            char *out = run_capture(rest, sel, len, &st, &olen);
+            if (st != 0) {
+                /* like micro: a failing filter leaves the text alone */
+                char *q;
+                for (q = out; *q; q++) if (*q == '\n' || *q == '\r' || *q == '\t') *q = ' ';
+                editor_set_error("textfilter: command failed: %s", out);
+            } else {
+                Loc s0 = c->sel[0];
+                Loc end = buf_replace(p->buf, c->sel[0], c->sel[1], out, olen);
+                c->loc = end;
+                c->sel[0] = c->orig[0] = s0;
+                c->sel[1] = c->orig[1] = end;
+            }
             free(sel);
             free(out);
         }
