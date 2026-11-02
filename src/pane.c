@@ -239,7 +239,10 @@ static void compute_wrap(const Pane *p, int y) {
                 wrap_push(last_break_b, last_break_v);
                 rowvx = last_break_v;
                 last_break_b = -1;
-                if (vx - rowvx + w > width) {
+                /* still too wide: start another row at i, unless i is
+                   the break itself (rows must start at increasing bytes;
+                   an oversized char then fills the break's row alone) */
+                if (vx - rowvx + w > width && vx > rowvx) {
                     wrap_push(i, vx);
                     rowvx = vx;
                 }

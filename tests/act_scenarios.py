@@ -548,6 +548,44 @@ def open_over_unnamed_save(t, env):
     assert got == b"hello\n" or got == b"hello", got
 
 
+def bind_unreadable_bindings(t, env):
+    """bind must not replace a bindings.json it cannot read (here: too large
+    for read_file) with a file holding only the new binding"""
+    path = os.path.join(env.cfg, "bindings.json")
+    with open(path, "wb") as f:
+        f.truncate(3 << 30)  # sparse, > INT_MAX bytes
+    cmd(t, "bind F5 Redo", 0.4)
+    assert os.path.getsize(path) == 3 << 30, os.path.getsize(path)
+    assert "cannot read bindings.json" in t.text(), t.text()
+
+
+@with_env(bindings='{"Ctrl-x":"Undo","F3":"Redo","Ctrl-x":"Cut","F3":"Copy"}')
+def bind_duplicate_keys(t, env):
+    """bind/unbind on a key bindings.json holds twice: the later entry wins
+    on reload, so it must not survive"""
+    import json
+    cmd(t, "bind Ctrl-x Paste", 0.4)
+    cmd(t, "unbind F3", 0.4)
+    with open(os.path.join(env.cfg, "bindings.json")) as f:
+        pairs = json.load(f, object_pairs_hook=list)
+    assert pairs == [("Ctrl-x", "Paste")], pairs
+
+
+@with_env(files={"a.txt": "xx ÉCOLE yy\nk K\nS ſ\n"},
+          settings='{"ignorecase": true}')
+@with_args("a.txt")
+def find_ignorecase_unicode_fold(t, env):
+    """Find with ignorecase folds like the regex (and replace) does:
+    Unicode simple folding, also for plain-string patterns"""
+    for pat, rep in (("école", "1"), ("K", "2"), ("k", "3"), ("s", "4"), ("ſ", "5")):
+        t.send(CTRL("f"), 0.1)
+        t.send(pat.encode(), 0.1)
+        t.send(ENTER, 0.2)
+        t.send(rep.encode(), 0.1)  # replaces the found (selected) text
+    got = save_and_read(t, env, "a.txt")
+    assert got == b"xx 1 yy\n2 3\n4 5\n", got
+
+
 SCENARIOS = [rebind_running_key, replace_dollar_overflow, goto_huge_numbers,
              replaceall_empty_matches, replace_interactive_quit, multicursor_edits,
              autocomplete_then_edit, macro_with_quit_and_prompt, long_command_binding,
@@ -556,7 +594,8 @@ SCENARIOS = [rebind_running_key, replace_dollar_overflow, goto_huge_numbers,
              replaceall_results, replaceall_groups, replaceall_empty_pattern, replaceall_selection,
              replace_interactive_results, tabsize_fraction, wheel_closes_other_pane,
              nul_lines_move_dup, duplicate_selection_lines, autocomplete_cycle, smartpaste,
-             open_over_unnamed_save]
+             open_over_unnamed_save, bind_unreadable_bindings, bind_duplicate_keys,
+             find_ignorecase_unicode_fold]
 
 if __name__ == "__main__":
     only = os.environ.get("ONLY")

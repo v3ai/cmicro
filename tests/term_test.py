@@ -77,6 +77,18 @@ def test_control_chars_are_sanitized():
     assert finish(t)
 
 
+def test_one_column_format_chars_are_replaced():
+    # ALM, MVS and tag characters count one column: drawn as U+FFFD, never
+    # sent to the terminal (ALM is a bidi control)
+    p = write("fmt.txt", "a؜b᠎c\U000E0041d\U000E007Fe\n".encode())
+    t = editor([p], extra=["-ruler", "off"])
+    quiet(t)
+    assert t.line(0).startswith("a�b�c�d�e"), repr(t.line(0))
+    for s in ("؜", "᠎", "\U000E0041", "\U000E007F"):
+        assert s.encode() not in t.raw, repr(s)
+    assert finish(t)
+
+
 def test_tiny_and_huge_sizes():
     p = write("small.c", b"int main() {\n\treturn 0;\n}\n" * 30)
     t = editor([p])
@@ -152,6 +164,24 @@ def test_wide_chars_at_the_edge():
     t.send(b"\x1b[F", 0.2)  # End: scroll horizontally
     assert full_redraw_matches(t)
     t.send(CTRL("e") + b"set softwrap on" + ENTER, 0.3)
+    assert full_redraw_matches(t)
+    assert finish(t)
+
+
+def test_wordwrap_wide_char_after_break():
+    # a tab wider than the pane right after a space: no duplicate (empty)
+    # wrap row, and Up must leave the line
+    p = write("ww.txt", b"z\na \tb\n")
+    t = editor([p], cols=4, rows=10, extra=["-ruler", "off", "-softwrap", "on", "-wordwrap", "on",
+                                            "-tabsize", "8", "-statusformatl", "$(line)",
+                                            "-statusformatr", ""])
+    t.send(DOWN, 0.1)
+    t.send(b"\x1b[C\x1b[C", 0.2)
+    assert [t.line(y).rstrip() for y in range(4)] == ["z", "a", "", "b"], t.text()
+    assert t.cursor() == (0, 2), t.cursor()
+    t.send(UP, 0.1)
+    t.send(UP, 0.2)
+    assert t.cursor() == (0, 0) and t.line(8).strip() == "1", (t.cursor(), t.text())
     assert full_redraw_matches(t)
     assert finish(t)
 

@@ -405,9 +405,27 @@ static Regex *get_search_re(Buffer *b, const char *pat, int regex, char **err) {
     free(search_cache_fold);
     search_cache_fold = NULL;
     if (search_cache && *pat && ((flags & RE_LITERAL) || !strpbrk(pat, "\\.+*?()|[]{}^$"))) {
-        search_cache_lit = flags & RE_ICASE ? 2 : 1;
+        const char *u;
+        int ascii = 1, ascii_fold = 1, exact = 1, plen = (int)strlen(pat), n, cp;
+        for (u = pat; *u; u++) {
+            unsigned char c = (unsigned char)*u;
+            if (c >= 0x80) ascii = 0;
+            /* Unicode simple folding takes k and s out of ASCII
+               (U+212A KELVIN SIGN, U+017F LATIN SMALL LETTER LONG S) */
+            else if (c == 'k' || c == 'K' || c == 's' || c == 'S') ascii_fold = 0;
+        }
+        /* the regex reads an invalid byte as U+FFFD, which then matches
+           any invalid byte or a real U+FFFD: memcmp can't do that */
+        for (u = pat; *u; u += n) {
+            n = utf8_decode(u, plen - (int)(u - pat), &cp);
+            if (cp == 0xFFFD) { exact = 0; break; }
+        }
+        if (flags & RE_ICASE) search_cache_lit = ascii && ascii_fold ? 2 : 0;
+        else search_cache_lit = exact ? 1 : 0;
         if (search_cache_lit == 2) {
-            /* the regex engine folds ASCII letters only; so do we */
+            /* the pattern is ASCII without k/s, so the regex engine's
+               Unicode simple case folding stays within ASCII: fold
+               ASCII letters only, as it does */
             char *q;
             search_cache_fold = xstrdup(pat);
             for (q = search_cache_fold; *q; q++)
@@ -1340,18 +1358,22 @@ typedef struct {
     int then_quit;
 } SudoCtx;
 
+/* saves through the sudo command; returns 1 if it worked */
+static int sudo_save(Pane *p, const char *path) {
+    char *err = NULL;
+    if (buf_save_sudo(p->buf, path, &err) == 0) {
+        editor_set_message("Saved %s", path);
+        return 1;
+    }
+    editor_set_error("%s", err);
+    free(err);
+    return 0;
+}
+
 static void sudo_yn(int yes, int canceled, void *data) {
     SudoCtx *s = data;
-    char *err = NULL;
-    if (yes && !canceled) {
-        if (buf_save_sudo(s->p->buf, s->path, &err) == 0) {
-            editor_set_message("Saved %s", s->path);
-            if (s->then_quit) quit_after_save(s->p);
-        } else {
-            editor_set_error("%s", err);
-            free(err);
-        }
-    }
+    if (yes && !canceled && sudo_save(s->p, s->path) && s->then_quit)
+        quit_after_save(s->p);
     free(s->path);
     free(s);
 }
@@ -1365,23 +1387,23 @@ static int save_to(Pane *p, const char *path, int then_quit) {
         return 1;
     }
     if (rc == -2) {
-        SudoCtx *s = xmalloc(sizeof *s);
-        s->p = p;
-        s->path = xstrdup(path);
-        s->then_quit = then_quit;
+        SudoCtx *s;
+        char *msg;
         free(err);
         if (!plat_has_sudo()) {
             editor_set_error("Permission denied. Save with sudo not supported on Windows");
-            free(s->path);
-            free(s);
             return 0;
         }
-        if (BOPT(p->buf, O_AUTOSU)) sudo_yn(1, 0, s);
-        else {
-            char *msg = xsprintf("Permission denied. Do you want to save this file using %s? (y,n)", GOPTS(O_SUCMD));
-            prompt_yn(msg, sudo_yn, s);
-            free(msg);
-        }
+        /* autosu saves now: report it, and leave then_quit to the caller
+           (which quits on a return of 1) so the pane isn't closed twice */
+        if (BOPT(p->buf, O_AUTOSU)) return sudo_save(p, path);
+        s = xmalloc(sizeof *s);
+        s->p = p;
+        s->path = xstrdup(path);
+        s->then_quit = then_quit;
+        msg = xsprintf("Permission denied. Do you want to save this file using %s? (y,n)", GOPTS(O_SUCMD));
+        prompt_yn(msg, sudo_yn, s);
+        free(msg);
         return 0;
     }
     editor_set_error("%s", err);
