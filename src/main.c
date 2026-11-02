@@ -13,6 +13,7 @@
 void editor_init_hooks(void);
 void editor_check_external_changes(void);
 void editor_autosave_tick(void);
+void backup_flush_all(void);                 /* backup.c */
 
 int term_ready;
 
@@ -96,22 +97,34 @@ static void print_options(void) {
     }
 }
 
+/* "+LINE" / "LINE" number from the command line, clamped (never overflows) */
+static int parse_num(const char *s) {
+    long v = 0;
+    while (*s >= '0' && *s <= '9') {
+        if (v < 100000000L) v = v * 10 + (*s - '0');
+        s++;
+    }
+    return (int)v;
+}
+
 /* like micro: $MICRO_CONFIG_HOME, $XDG_CONFIG_HOME/micro, ~/.config/micro
-   (on Windows ~ is %USERPROFILE%) */
+   (on Windows ~ is %USERPROFILE%).  A relative $XDG_CONFIG_HOME is
+   ignored, as the XDG spec says.  New directories are private (0700):
+   backups and history hold file contents. */
 static void init_config_dir(const char *override) {
     char *mch = plat_getenv("MICRO_CONFIG_HOME");
     char *xdg = plat_getenv("XDG_CONFIG_HOME");
     char *home = plat_home_dir();
     if (override) config_dir = expand_home(override);
     else if (mch && *mch) config_dir = expand_home(mch);
-    else if (xdg && *xdg) config_dir = xsprintf("%s/micro", xdg);
+    else if (xdg && plat_is_abs(xdg)) config_dir = xsprintf("%s/micro", xdg);
     else if (home) config_dir = xsprintf("%s/.config/micro", home);
     else config_dir = NULL;
     free(mch);
     free(xdg);
     free(home);
     if (config_dir && !plat_is_dir(config_dir)) {
-        if (plat_mkdir_p(config_dir) != 0) {
+        if (plat_mkdir_private(config_dir) != 0) {
             /* not fatal: run without a config dir */
         }
     }
@@ -156,8 +169,8 @@ int main(int argc, char **argv) {
             return 1;
         } else if (a[0] == '+' && a[1] >= '0' && a[1] <= '9') {
             const char *c = strchr(a, ':');
-            pend_line = atoi(a + 1);
-            pend_col = c ? atoi(c + 1) : -1;
+            pend_line = parse_num(a + 1);
+            pend_col = c ? parse_num(c + 1) : -1;
         } else if (a[0] == '-' && a[1] && strcmp(a, "--") != 0 && opt_find(a + 1) >= 0 && i + 1 < argc) {
             optnames[nopts] = (char *)(a + 1);
             optvals[nopts] = argv[++i];
@@ -243,11 +256,14 @@ int main(int argc, char **argv) {
         }
     }
     if (stdin_text) {
-        Buffer *b = buf_from_string("", stdin_text, BT_DEFAULT);
-        free(b->path);
-        b->path = xstrdup("");
-        free(b->name);
-        b->name = xstrdup("");
+        /* by length: piped data may contain NUL bytes */
+        Buffer *b = buf_from_string("", "", BT_DEFAULT);
+        if (stdin_len > 0x7FFFFF00L) {
+            fputs("micro: standard input is too large (2 GB at most)\n", stderr);
+            return 1;
+        }
+        buf_set_text(b, stdin_text, (int)stdin_len);
+        buf_update_rules(b);
         /* piped text counts as unsaved */
         b->saved_id = -1;
         editor_add_tab(pane_new(b));
@@ -300,6 +316,15 @@ int main(int argc, char **argv) {
                 }
             }
             editor_autosave_tick();
+            if (plat_take_signal()) {
+                /* SIGTERM / SIGHUP / the terminal went away: keep the
+                   unsaved changes as backups (they are offered for
+                   recovery next time) and leave */
+                backup_flush_all();
+                history_save();
+                cleanup();
+                return 1;
+            }
             if (plat_now_ms() - last_check > 1000) {
                 last_check = plat_now_ms();
                 editor_check_external_changes();

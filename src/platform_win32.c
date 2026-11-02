@@ -706,6 +706,154 @@ char *plat_clipboard_get(int *len) {
     return s;
 }
 
+/* ---------------- safe file writing ---------------- */
+
+static char save_err[256];
+
+static void set_win_err(const char *path, DWORD e) {
+    char msg[160];
+    DWORD n = FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, e, 0, msg,
+                             (DWORD)sizeof msg, NULL);
+    while (n > 0 && (msg[n - 1] == '\n' || msg[n - 1] == '\r' || msg[n - 1] == ' ' || msg[n - 1] == '.')) n--;
+    msg[n] = 0;
+    snprintf(save_err, sizeof save_err, "%s: %s", path, n ? msg : "error");
+}
+
+const char *plat_save_error(void) { return save_err[0] ? save_err : "unknown error"; }
+
+struct PlatSave {
+    HANDLE h;
+    wchar_t *wtmp;  /* temporary file that replaces wdest on commit, or NULL */
+    wchar_t *wdest;
+    char *dest;
+    int failed;
+};
+
+static int denied_err(DWORD e) {
+    return e == ERROR_ACCESS_DENIED || e == ERROR_WRITE_PROTECT || e == ERROR_SHARING_VIOLATION;
+}
+
+static void save_free(PlatSave *s) {
+    free(s->wtmp);
+    free(s->wdest);
+    free(s->dest);
+    free(s);
+}
+
+PlatSave *plat_save_open(const char *path, long long size, int flags, int *denied) {
+    PlatSave *s = calloc(1, sizeof *s);
+    wchar_t *wdir;
+    DWORD a;
+    (void)size;
+    (void)flags; /* the profile directories are per-user already */
+    if (denied) *denied = 0;
+    save_err[0] = 0;
+    if (!s) return NULL;
+    s->h = INVALID_HANDLE_VALUE;
+    s->wdest = to_w(path);
+    s->dest = malloc(strlen(path) + 1);
+    if (!s->wdest || !s->dest) { save_free(s); return NULL; }
+    strcpy(s->dest, path);
+    a = GetFileAttributesW(s->wdest);
+    if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_READONLY)) {
+        set_win_err(path, ERROR_ACCESS_DENIED);
+        if (denied) *denied = 1;
+        save_free(s);
+        return NULL;
+    }
+    /* write a temporary file next to the target, then swap it in */
+    wdir = malloc(sizeof(wchar_t) * (wcslen(s->wdest) + 2));
+    if (wdir) {
+        wchar_t *q, *slash = NULL;
+        wcscpy(wdir, s->wdest);
+        for (q = wdir; *q; q++)
+            if (*q == L'\\' || *q == L'/') slash = q;
+        if (slash) slash[1] = 0;
+        else wcscpy(wdir, L".");
+        s->wtmp = malloc(sizeof(wchar_t) * (MAX_PATH + 16));
+        if (s->wtmp && wcslen(wdir) < MAX_PATH - 14 && GetTempFileNameW(wdir, L"mic", 0, s->wtmp) != 0) {
+            s->h = CreateFileW(s->wtmp, GENERIC_WRITE, 0, NULL, TRUNCATE_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (s->h == INVALID_HANDLE_VALUE) DeleteFileW(s->wtmp);
+        }
+        if (s->h == INVALID_HANDLE_VALUE) { free(s->wtmp); s->wtmp = NULL; }
+        free(wdir);
+    }
+    if (s->h == INVALID_HANDLE_VALUE) {
+        /* rewrite in place */
+        s->h = CreateFileW(s->wdest, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (s->h == INVALID_HANDLE_VALUE) {
+            DWORD e = GetLastError();
+            set_win_err(path, e);
+            if (denied) *denied = denied_err(e);
+            save_free(s);
+            return NULL;
+        }
+    }
+    return s;
+}
+
+int plat_save_write(PlatSave *s, const void *data, size_t n) {
+    const char *p = data;
+    if (s->failed) return -1;
+    while (n > 0) {
+        DWORD w = 0, chunk = n > 0x10000000 ? 0x10000000 : (DWORD)n;
+        if (!WriteFile(s->h, p, chunk, &w, NULL) || w == 0) {
+            set_win_err(s->dest, GetLastError());
+            s->failed = 1;
+            return -1;
+        }
+        p += w;
+        n -= w;
+    }
+    return 0;
+}
+
+int plat_save_close(PlatSave *s, int commit) {
+    int rc = s->failed ? -1 : 0;
+    if (rc == 0 && commit && !FlushFileBuffers(s->h)) { set_win_err(s->dest, GetLastError()); rc = -1; }
+    CloseHandle(s->h);
+    if (s->wtmp) {
+        if (rc == 0 && commit) {
+            /* ReplaceFileW keeps the target's attributes and ACL */
+            if (GetFileAttributesW(s->wdest) == INVALID_FILE_ATTRIBUTES ||
+                !ReplaceFileW(s->wdest, s->wtmp, NULL, REPLACEFILE_IGNORE_MERGE_ERRORS, NULL, NULL)) {
+                if (!MoveFileExW(s->wtmp, s->wdest, MOVEFILE_REPLACE_EXISTING)) {
+                    set_win_err(s->dest, GetLastError());
+                    rc = -1;
+                }
+            }
+        }
+        if (rc != 0 || !commit) DeleteFileW(s->wtmp);
+    }
+    save_free(s);
+    return commit ? rc : 0;
+}
+
+FILE *plat_temp_file(const char *tag, char **path) {
+    wchar_t dir[MAX_PATH + 2], name[MAX_PATH + 16];
+    DWORD n = GetTempPathW(MAX_PATH + 1, dir);
+    FILE *f;
+    (void)tag;
+    *path = NULL;
+    if (n == 0 || n > MAX_PATH - 14) return NULL;
+    if (GetTempFileNameW(dir, L"mic", 0, name) == 0) return NULL; /* creates it */
+    f = _wfopen(name, L"w+b");
+    if (!f) { DeleteFileW(name); return NULL; }
+    *path = from_w(name);
+    if (!*path) { fclose(f); DeleteFileW(name); return NULL; }
+    return f;
+}
+
+int plat_run(const char *const *argv, const char *in_path) {
+    (void)argv;
+    (void)in_path;
+    return -1; /* only used for sudo, which Windows doesn't have */
+}
+
+int plat_mkdir_private(const char *path) { return plat_mkdir_p(path); }
+int plat_owns_file(const char *path) { return plat_exists(path) && !plat_is_dir(path); }
+int plat_take_signal(void) { return 0; }
+
 #endif /* _WIN32 */
 
 /* ISO C forbids an empty translation unit */

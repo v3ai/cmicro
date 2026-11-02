@@ -104,6 +104,12 @@ const OptDef opt_defs[O_COUNT] = {
 };
 
 OptVal gopts[O_COUNT];
+
+/* Integer options stay far from INT_MAX so arithmetic on them (scroll
+   margins, autosave seconds * 1000, tab stops) can't overflow; tabsize
+   is also the length of an indent string. */
+#define OPT_INT_MAX 1000000
+#define TABSIZE_MAX 256
 static CNode *parsed; /* settings.json contents */
 static int parse_error; /* never overwrite a settings.json we failed to parse */
 
@@ -128,8 +134,12 @@ int opt_parse(int id, const char *value, OptVal *out, char **err) {
     case OT_INT: {
         char *end;
         double v = strtod(value, &end);
-        if (end == value || *end || v != v || v > 1e9 || v < -1e9) {
+        if (end == value || *end || v != v || v > OPT_INT_MAX || v < -OPT_INT_MAX) {
             if (err) *err = xstrdup("Invalid value");
+            return -1;
+        }
+        if (id == O_TABSIZE && v > TABSIZE_MAX) {
+            if (err) *err = xsprintf("tabsize must be at most %d", TABSIZE_MAX);
             return -1;
         }
         if (d->nonneg == 1 && v < 0) { if (err) *err = xsprintf("%s must be non-negative", d->name); return -1; }
@@ -186,11 +196,11 @@ void options_init_defaults(void) {
 static int json_to_opt(int id, CNode *v, OptVal *out) {
     if (!v) return -1;
     if (opt_defs[id].type == OT_BOOL && v->type == CN_BOOL) { out->i = v->b; out->s = NULL; return 0; }
-    if (opt_defs[id].type == OT_INT && v->type == CN_NUM) return opt_parse(id, v->str, out, NULL);
+    if (opt_defs[id].type == OT_INT && v->type == CN_NUM) return v->str ? opt_parse(id, v->str, out, NULL) : -1;
     if (opt_defs[id].type == OT_INT && v->type == CN_BOOL && id == O_AUTOSAVE) {
         out->i = v->b ? 8 : 0; out->s = NULL; return 0;
     }
-    if (v->type == CN_STR || v->type == CN_NUM || v->type == CN_BOOL)
+    if ((v->type == CN_STR || v->type == CN_NUM || v->type == CN_BOOL) && v->str)
         return opt_parse(id, v->str, out, NULL);
     return -1;
 }
@@ -262,19 +272,20 @@ void settings_apply_parsed(struct Buffer *b, const char *path) {
     }
 }
 
-static void json_write_str(FILE *f, const char *s) {
-    fputc('"', f);
+static void json_write_str(Str *o, const char *s) {
+    str_putc(o, '"');
     for (; *s; s++) {
-        if (*s == '"' || *s == '\\') { fputc('\\', f); fputc(*s, f); }
-        else if (*s == '\n') fputs("\\n", f);
-        else if (*s == '\t') fputs("\\t", f);
-        else if ((unsigned char)*s < 32) fprintf(f, "\\u%04x", *s);
-        else fputc(*s, f);
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\') { str_putc(o, '\\'); str_putc(o, (char)c); }
+        else if (c == '\n') str_puts(o, "\\n");
+        else if (c == '\t') str_puts(o, "\\t");
+        else if (c < 32 || c == 127) str_printf(o, "\\u%04x", c);
+        else str_putc(o, (char)c);
     }
-    fputc('"', f);
+    str_putc(o, '"');
 }
 
-static void json_write(FILE *f, CNode *n, int ind) {
+static void json_write(Str *o, CNode *n, int ind) {
     int i, j;
     switch (n->type) {
     case CN_MAP: {
@@ -284,30 +295,30 @@ static void json_write(FILE *f, CNode *n, int ind) {
             for (j = i; j > 0 && strcmp(n->keys[ord[j - 1]], n->keys[ord[j]]) > 0; j--) {
                 int t = ord[j]; ord[j] = ord[j - 1]; ord[j - 1] = t;
             }
-        fputs("{\n", f);
+        str_puts(o, "{\n");
         for (i = 0; i < n->n; i++) {
-            fprintf(f, "%*s", ind + 4, "");
-            json_write_str(f, n->keys[ord[i]]);
-            fputs(": ", f);
-            json_write(f, n->vals[ord[i]], ind + 4);
-            fputs(i + 1 < n->n ? ",\n" : "\n", f);
+            str_printf(o, "%*s", ind + 4, "");
+            json_write_str(o, n->keys[ord[i]]);
+            str_puts(o, ": ");
+            json_write(o, n->vals[ord[i]], ind + 4);
+            str_puts(o, i + 1 < n->n ? ",\n" : "\n");
         }
-        fprintf(f, "%*s}", ind, "");
+        str_printf(o, "%*s}", ind, "");
         free(ord);
         break;
     }
     case CN_LIST:
-        fputs("[", f);
+        str_puts(o, "[");
         for (i = 0; i < n->n; i++) {
-            if (i) fputs(", ", f);
-            json_write(f, n->vals[i], ind);
+            if (i) str_puts(o, ", ");
+            json_write(o, n->vals[i], ind);
         }
-        fputs("]", f);
+        str_puts(o, "]");
         break;
-    case CN_STR: json_write_str(f, n->str); break;
-    case CN_NUM: fputs(n->str, f); break;
-    case CN_BOOL: fputs(n->b ? "true" : "false", f); break;
-    default: fputs("null", f); break;
+    case CN_STR: json_write_str(o, n->str ? n->str : ""); break;
+    case CN_NUM: str_puts(o, n->str ? n->str : "0"); break;
+    case CN_BOOL: str_puts(o, n->b ? "true" : "false"); break;
+    default: str_puts(o, "null"); break;
     }
 }
 
@@ -323,9 +334,14 @@ void settings_note_set(const char *name, const char *value) {
         v->b = !strcmp(value, "on") || !strcmp(value, "true");
         v->str = xstrdup(v->b ? "true" : "false");
     } else if (opt_defs[id].type == OT_INT) {
+        double d = atof(value);
         v = mknode(CN_NUM);
-        v->num = atof(value);
-        v->str = xsprintf("%d", (int)v->num);
+        /* (int) of an out-of-range double is undefined */
+        if (!(d == d)) d = 0;
+        if (d > OPT_INT_MAX) d = OPT_INT_MAX;
+        if (d < -OPT_INT_MAX) d = -OPT_INT_MAX;
+        v->num = d;
+        v->str = xsprintf("%d", (int)d);
     } else {
         v = mknode(CN_STR);
         v->str = xstrdup(value);
@@ -360,17 +376,26 @@ void settings_note_reset(const char *name) {
     }
 }
 
+/* written to a temporary file that then replaces settings.json, so a
+   full disk or a crash can't leave it truncated (a symlinked
+   settings.json is followed and its target replaced) */
 int settings_save(void) {
     char *path;
-    FILE *f;
+    Str o;
+    PlatSave *f;
+    int denied, rc;
     if (!config_dir || !parsed) return 0;
     if (parse_error) return -1;
+    str_init(&o);
+    str_reserve(&o, 0);
+    json_write(&o, parsed, 0);
+    str_putc(&o, '\n');
     path = xsprintf("%s/settings.json", config_dir);
-    f = plat_fopen(path, "w");
+    f = plat_save_open(path, (long long)o.len, 0, &denied);
     free(path);
-    if (!f) return -1;
-    json_write(f, parsed, 0);
-    fputc('\n', f);
-    fclose(f);
-    return 0;
+    if (!f) { str_free(&o); return -1; }
+    rc = plat_save_write(f, o.s, (size_t)o.len);
+    rc = plat_save_close(f, rc == 0) == 0 && rc == 0 ? 0 : -1;
+    str_free(&o);
+    return rc;
 }
