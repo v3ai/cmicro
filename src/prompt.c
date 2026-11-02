@@ -290,7 +290,7 @@ int prompt_handle(InEvent *ev) {
     if (pr->kind == PROMPT_YN) {
         YNDone d = pr->yn;
         void *data = pr->data;
-        if (ev->type != IN_KEY) return 1;
+        if (ev->type != IN_KEY || !d) return 1;
         if (ev->mods == 0 && (ev->key == 'y' || ev->key == 'Y')) {
             prompt_reset(); editor_layout(); d(1, 0, data);
         } else if (ev->mods == 0 && (ev->key == 'n' || ev->key == 'N')) {
