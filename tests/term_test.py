@@ -39,15 +39,15 @@ def resize(t, w, h):
     t.screen.resize(min(h, 500), min(w, 500))
     fcntl.ioctl(t.fd, termios.TIOCSWINSZ, struct.pack("HHHH", h, w, 0, 0))
     os.kill(t.pid, signal.SIGWINCH)
-    quiet(t)
+    quiet(t, 0.7)
 
 
 def full_redraw_matches(t):
     """the incrementally updated screen must equal a full redraw"""
-    quiet(t)
+    quiet(t, 0.7)  # > 500 ms: see term_stress.py
     before = t.screen.display[:]
     os.kill(t.pid, signal.SIGWINCH)  # same size: forces a full redraw
-    quiet(t)
+    quiet(t, 0.7)
     after = t.screen.display
     for y in range(len(before)):
         if before[y] != after[y]:
