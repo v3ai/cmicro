@@ -159,11 +159,13 @@ def main():
             if r < 0.05 and size[0] <= 300 and size[1] <= 120:
                 # incremental output must leave the screen exactly as a full
                 # redraw does (a same-size SIGWINCH forces one)
-                quiet(t)
+                # (wait > 500 ms: a SIGWINCH that lands just before the
+                # editor blocks in poll() is only noticed at the timeout)
+                quiet(t, 0.7)
                 before = t.screen.display[:]
                 n0 = len(t.raw)
                 os.kill(t.pid, signal.SIGWINCH)
-                quiet(t)
+                quiet(t, 0.7)
                 exited = b"\x1b[?1049l" in t.raw[n0:] or not t.alive()
                 if not exited and t.screen.display != before:
                     diff = [(y, before[y], t.screen.display[y]) for y in range(len(before))
