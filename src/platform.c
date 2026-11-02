@@ -24,6 +24,9 @@
 #include <termios.h>
 #include <unistd.h>
 #include <poll.h>
+#if defined(__linux__) || defined(__APPLE__)
+#include <sys/xattr.h>
+#endif
 
 #ifndef O_CLOEXEC
 #define O_CLOEXEC 0
@@ -464,6 +467,7 @@ struct PlatSave {
     char *dest;   /* final name (symlinks resolved) */
     int failed;
     int is_reg;   /* in place on a regular file: truncate at the end */
+    int priv;     /* PLAT_SAVE_PRIVATE */
     size_t nbuf;
     char buf[1 << 16];
 };
@@ -516,6 +520,32 @@ static int reserve_space(int fd, off_t old_size, long long size) {
     return 0;
 }
 
+/* does the file carry extended attributes (ACLs, security labels, file
+   capabilities, user.* attributes)?  A new inode wouldn't have them, so
+   such a file is rewritten in place.  When unsure, say yes. */
+static int has_xattrs(const char *path) {
+#if defined(__linux__) || defined(__APPLE__)
+#ifdef __APPLE__
+    ssize_t n = listxattr(path, NULL, 0, 0);
+#else
+    ssize_t n = listxattr(path, NULL, 0);
+#endif
+    if (n < 0) {
+#ifdef ENOTSUP
+        if (errno == ENOTSUP) return 0;
+#endif
+#ifdef EOPNOTSUPP
+        if (errno == EOPNOTSUPP) return 0;
+#endif
+        return 1;
+    }
+    return n > 0;
+#else
+    (void)path;
+    return 0;
+#endif
+}
+
 PlatSave *plat_save_open(const char *path, long long size, int flags, int *denied) {
     PlatSave *s;
     struct stat st;
@@ -530,6 +560,7 @@ PlatSave *plat_save_open(const char *path, long long size, int flags, int *denie
     s->failed = 0;
     s->is_reg = 0;
     s->nbuf = 0;
+    s->priv = priv != 0;
     if (priv) {
         /* never follow a symlink planted at a state-file path */
         have = lstat(path, &st) == 0;
@@ -542,8 +573,12 @@ PlatSave *plat_save_open(const char *path, long long size, int flags, int *denie
     if (!s->dest) { set_err(path, ENOMEM); free(s); return NULL; }
 
     /* replace through a temporary file when that changes nothing else
-       about the file: a regular file we own, with no other hard links */
-    if (priv || (have && S_ISREG(st.st_mode) && st.st_nlink == 1 && st.st_uid == geteuid())) {
+       about the file: a writable regular file we own, with no other hard
+       links and no extended attributes (ACLs, SELinux labels...).  A
+       read-only file goes to the in-place open below, which reports the
+       permission problem. */
+    if (priv || (have && S_ISREG(st.st_mode) && st.st_nlink == 1 && st.st_uid == geteuid() &&
+                 (st.st_mode & S_IWUSR) && !has_xattrs(s->dest))) {
         char *tmp = temp_name_for(s->dest);
         int fd = tmp ? mkstemp(tmp) : -1;
         if (fd >= 0) {
@@ -632,6 +667,39 @@ int plat_save_write(PlatSave *s, const void *data, size_t n) {
     return 0;
 }
 
+/* rename() couldn't replace s->dest (EBUSY: it is a bind mount, say):
+   copy the finished temporary file over it in place instead */
+static int copy_into_dest(PlatSave *s) {
+    int in, out, rc = -1, e = 0;
+    struct stat ts, ds;
+    in = open(s->tmp, O_RDONLY | O_CLOEXEC);
+    if (in < 0) { set_err(s->dest, errno); return -1; }
+    out = open(s->dest, O_WRONLY | O_CLOEXEC | (s->priv ? O_NOFOLLOW : 0));
+    if (out < 0 || fstat(in, &ts) != 0 || fstat(out, &ds) != 0) { e = errno; goto done; }
+    if (S_ISREG(ds.st_mode) && reserve_space(out, ds.st_size, (long long)ts.st_size) != 0) {
+        e = errno;
+        goto done;
+    }
+    for (;;) {
+        ssize_t n = read(in, s->buf, sizeof s->buf);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            e = errno;
+            goto done;
+        }
+        if (n == 0) break;
+        if (write_all(out, s->buf, (size_t)n) != 0) { e = errno; goto done; }
+    }
+    if (S_ISREG(ds.st_mode) && ftruncate(out, ts.st_size) != 0) { e = errno; goto done; }
+    if (fsync(out) != 0 && errno != EINVAL) { e = errno; goto done; }
+    rc = 0;
+done:
+    if (out >= 0 && close(out) != 0 && rc == 0) { e = errno; rc = -1; }
+    close(in);
+    if (rc != 0) set_err(s->dest, e);
+    return rc;
+}
+
 int plat_save_close(PlatSave *s, int commit) {
     int rc = 0;
     if (!s) return -1;
@@ -647,8 +715,21 @@ int plat_save_close(PlatSave *s, int commit) {
     }
     if (close(s->fd) != 0 && rc == 0 && commit) { set_err(s->dest, errno); rc = -1; }
     if (s->tmp) {
-        if (rc == 0 && commit && rename(s->tmp, s->dest) != 0) { set_err(s->dest, errno); rc = -1; }
-        if (rc != 0 || !commit) unlink(s->tmp);
+        int renamed = 0;
+        if (rc == 0 && commit) {
+            if (rename(s->tmp, s->dest) == 0) {
+                renamed = 1;
+            } else {
+                int e = errno;
+                if (e == EBUSY || e == EXDEV || e == EINVAL) {
+                    rc = copy_into_dest(s);
+                } else {
+                    set_err(s->dest, e);
+                    rc = -1;
+                }
+            }
+        }
+        if (!renamed) unlink(s->tmp);
         free(s->tmp);
     }
     free(s->dest);

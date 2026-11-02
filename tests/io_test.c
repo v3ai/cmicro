@@ -7,11 +7,20 @@
  * link every editor object except main.o and backup.o.
  */
 #define _POSIX_C_SOURCE 200809L
+#ifdef __linux__
+#define _GNU_SOURCE /* unshare() */
+#endif
 #include "../src/backup.c"
 
 #include <errno.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <sched.h>
+#include <sys/mount.h>
+#include <sys/xattr.h>
+#endif
 
 int term_ready;
 static int prompt_answer = 1; /* index into backup choices: 1 = ignore */
@@ -262,6 +271,105 @@ static void test_files(void) {
     free(p);
 }
 
+static ino_t file_ino(const char *p) {
+    struct stat st;
+    return stat(p, &st) == 0 ? st.st_ino : 0;
+}
+
+static int read_is(const char *p, const char *want) {
+    size_t n;
+    char *data = read_raw(p, &n);
+    int ok = data && n == strlen(want) && !memcmp(data, want, n);
+    free(data);
+    return ok;
+}
+
+/* when the save may not go through a temporary file + rename */
+static void test_save_paths(void) {
+    char *p = tpath("paths.txt"), *err = NULL;
+    Buffer *b = buf_new_empty();
+    ino_t ino;
+    int rc;
+    buf_set_text(b, "new\n", 4);
+
+    /* a read-only file we own is not silently replaced: denied (the
+       caller offers sudo); root writes it in place, mode unchanged */
+    write_raw(p, "original\n", 9);
+    chmod(p, 0444);
+    ino = file_ino(p);
+    rc = buf_save(b, p, &err);
+    if (geteuid() != 0) {
+        CHECK(rc == -2);
+        CHECK(read_is(p, "original\n"));
+    } else {
+        CHECK(rc == 0);
+        CHECK(read_is(p, "new\n"));
+        CHECK(file_ino(p) == ino && file_mode(p) == 0444);
+    }
+    free(err);
+    err = NULL;
+    chmod(p, 0644);
+
+#ifdef __linux__
+    /* extended attributes (ACLs, SELinux labels...) survive: in place */
+    write_raw(p, "original\n", 9);
+    if (setxattr(p, "user.micro_test", "v", 1, 0) == 0) {
+        char v[8];
+        ino = file_ino(p);
+        CHECK(buf_save(b, p, &err) == 0);
+        CHECK(read_is(p, "new\n"));
+        CHECK(file_ino(p) == ino);
+        CHECK(getxattr(p, "user.micro_test", v, sizeof v) == 1 && v[0] == 'v');
+    } else {
+        fprintf(stderr, "  xattr test skipped: %s\n", strerror(errno));
+    }
+    unlink(p);
+
+    /* a bind-mounted file can't be renamed over (EBUSY): it is
+       rewritten in place instead (needs root and mount namespaces) */
+    if (geteuid() == 0) {
+        char *src = tpath("bind-src.txt");
+        pid_t pid;
+        int status = 0;
+        write_raw(p, "old\n", 4);
+        write_raw(src, "older contents\n", 15);
+        pid = fork();
+        if (pid == 0) {
+            if (unshare(CLONE_NEWNS) != 0 || mount("none", "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0 ||
+                mount(src, p, NULL, MS_BIND, NULL) != 0)
+                _exit(77);
+            rc = buf_save(b, p, &err);
+            if (rc != 0) fprintf(stderr, "  bind mount save: %s\n", err ? err : "?");
+            _exit(rc == 0 && read_is(p, "new\n") ? 0 : 1);
+        }
+        CHECK(pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status));
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 77) {
+            fprintf(stderr, "  bind mount test skipped: %s\n", strerror(errno));
+        } else {
+            CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+            CHECK(read_is(src, "new\n")); /* written through the mount */
+            CHECK(read_is(p, "old\n"));
+            {
+                /* no temporary file left behind */
+                char **ls = plat_list_dir(dir);
+                int k, stray = 0;
+                for (k = 0; ls && ls[k]; k++) {
+                    if (strstr(ls[k], ".micro-")) stray = 1;
+                    free(ls[k]);
+                }
+                free(ls);
+                CHECK(!stray);
+            }
+        }
+        unlink(src);
+        free(src);
+    }
+#endif
+    unlink(p);
+    free(p);
+    buf_free(b);
+}
+
 static void test_private(void) {
     char *p = tpath("state"), *victim = tpath("victim"), *err = NULL, *data;
     Buffer *b = buf_new_empty();
@@ -431,6 +539,7 @@ int main(void) {
     test_text();
     test_undo();
     test_files();
+    test_save_paths();
     test_private();
     test_backup_names();
     test_backups();
