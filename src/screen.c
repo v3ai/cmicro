@@ -199,11 +199,14 @@ static int is_format_char(int cp) {
            (cp >= 0x2060 && cp <= 0x2064) || cp == 0xFEFF;
 }
 
-/* format characters that char_width() counts as one column (bidi
-   isolates, deprecated format controls, interlinear annotations) are
-   shown as a replacement character */
+/* format characters that char_width() counts as one column (the Arabic
+   letter mark, the Mongolian vowel separator, bidi isolates, deprecated
+   format controls, interlinear annotations, tag characters) are shown as
+   a replacement character */
 static int is_visible_format_char(int cp) {
-    return (cp >= 0x2065 && cp <= 0x206F) || (cp >= 0xFFF9 && cp <= 0xFFFB);
+    return cp == 0x061C || cp == 0x180E ||
+           (cp >= 0x2065 && cp <= 0x206F) || (cp >= 0xFFF9 && cp <= 0xFFFB) ||
+           (cp >= 0xE0000 && cp <= 0xE007F);
 }
 
 /* the cell at x of row r is about to be overwritten: if it is half of a
