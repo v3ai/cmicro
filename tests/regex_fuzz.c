@@ -6,6 +6,9 @@
  *   ./regex_fuzz -max_len=4096 corpus/
  *
  * Input: one flags byte, the pattern, a NUL byte, then the subject.
+ * re_compile refuses a pattern that is not valid UTF-8, so unless flag
+ * bit 0x80 is set, invalid bytes in the pattern are replaced by 'x' first
+ * (otherwise most mutated patterns would only exercise that check).
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -17,14 +20,34 @@
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 
+/* length of the valid UTF-8 sequence at s[0..n), 0 if invalid */
+static size_t utf8_len(const unsigned char *s, size_t n) {
+    unsigned c = s[0], cp, i, l;
+    if (c < 0x80) return 1;
+    if (c >= 0xc2 && c <= 0xdf) l = 2, cp = c & 0x1f;
+    else if (c >= 0xe0 && c <= 0xef) l = 3, cp = c & 0x0f;
+    else if (c >= 0xf0 && c <= 0xf4) l = 4, cp = c & 0x07;
+    else return 0;
+    if (n < l) return 0;
+    for (i = 1; i < l; i++) {
+        if ((s[i] & 0xc0) != 0x80) return 0;
+        cp = cp << 6 | (s[i] & 0x3fu);
+    }
+    if ((l == 3 && cp < 0x800) || (l == 4 && (cp < 0x10000 || cp > 0x10ffff)) ||
+        (cp >= 0xd800 && cp <= 0xdfff))
+        return 0;
+    return l;
+}
+
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     char *pat, *err = NULL;
     const char *subj;
     const uint8_t *nul;
-    int flags, slen, ncap, pos, prev_end, *caps, *caps1, steps = 0;
+    int flags, raw, slen, ncap, pos, prev_end, *caps, *caps1, steps = 0;
     Regex *re;
     if (size < 1) return 0;
     flags = data[0] & (RE_ICASE | RE_LITERAL);
+    raw = data[0] & 0x80;
     data++;
     size--;
     nul = memchr(data, 0, size);
@@ -32,12 +55,18 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     pat = malloc((size_t)(nul - data) + 1);
     memcpy(pat, data, (size_t)(nul - data));
     pat[nul - data] = 0;
+    if (!raw) {
+        size_t i = 0, n = (size_t)(nul - data), l;
+        for (; i < n; i += l)
+            if (!(l = utf8_len((unsigned char *)pat + i, n - i))) pat[i] = 'x', l = 1;
+    }
     subj = nul < data + size ? (const char *)nul + 1 : "";
     slen = nul < data + size ? (int)(data + size - nul - 1) : 0;
     re = re_compile(pat, flags, &err);
     free(pat);
     if (!re) {
         CHECK(err != NULL);
+        if (!raw) CHECK(!strstr(err, "UTF-8"));
         free(err);
         return 0;
     }

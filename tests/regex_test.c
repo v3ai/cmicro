@@ -110,6 +110,34 @@ int main(void) {
     t("(?i)[^k]", 0, "K", -1, 0, "");
     t("[^a]", 0, "\xff", -1, 0, "0 1");
     t(".", 0, "\xed\xa0\x80", -1, 0, "0 1");               /* surrogate: 3 bytes */
+    /* a surrogate never matches, also not via the literal fast path */
+    t("\\x{D800}", 0, "\xed\xa0\x80", -1, 0, "");
+    t("a\\x{DFFF}", 0, "a\xed\xbf\xbf", -1, 0, "");
+    t("\\x{D800}|zz", 0, "\xed\xa0\x80", -1, 0, "");
+    t("\\x{FFFD}", 0, "\xed\xa0\x80", -1, 0, "0 1");
+    /* like Go, a pattern must be valid UTF-8; a real U+FFFD is fine */
+    bad("\xff");
+    bad("a\xff");
+    bad("[\x80]");
+    bad("\xed\xa0\x80");
+    bad("\xc3");
+    t("\xef\xbf\xbd", 0, "a\x80\xef\xbf\xbd", -1, 0, "1 2");
+    t("\xef\xbf\xbd", RE_LITERAL, "a\x80\xef\xbf\xbd", -1, 0, "1 2");
+    {
+        char *err = NULL, *q = re_quote("\xff");
+        Regex *re = re_compile("\xff", RE_LITERAL, &err);
+        total++;
+        if (re || !err || !strstr(err, "UTF-8")) fail("should not compile", "\\xff (literal)", "compiled");
+        free(err);
+        re_free(re);
+        err = NULL;
+        re = re_compile(q, 0, &err);
+        total++;
+        if (re || !err) fail("should not compile", "re_quote(\\xff)", "compiled");
+        free(err);
+        re_free(re);
+        free(q);
+    }
     t("\xc3\xa9", 0, "\xc3\xc3\xa9", -1, 0, "1 3");
     t("\\x{1F600}", 0, "x\xf0\x9f\x98\x80", -1, 0, "1 5");
     t("\\012\\0", 0, "\n", 2, 0, "0 2");
@@ -222,7 +250,8 @@ int main(void) {
     t(p, RE_LITERAL, a, -1, 0, "");
     free(a);
     free(p);
-    /* many groups: submatches would need prog * groups memory */
+    /* many groups: submatches would need prog * groups memory, so they
+       are tracked in windows of slots, but all are still reported */
     p = repeat("(a)", 4000);
     re = re_compile(p, 0, NULL);
     a = repeat("a", 4000);
@@ -230,8 +259,12 @@ int main(void) {
     if (!re) fail("compile", "(a) x 4000", "failed");
     else {
         int *c = malloc(sizeof(int) * 2 * 4001);
-        if (!re_search(re, a, 4000, 0, c, 4001) || c[0] != 0 || c[1] != 4000 || c[2] != -1)
-            fail("match", "(a) x 4000", "wrong");
+        int i, ok = re_search(re, a, 4000, 0, c, 4001) && c[0] == 0 && c[1] == 4000;
+        for (i = 1; ok && i <= 4000; i++) ok = c[2 * i] == i - 1 && c[2 * i + 1] == i;
+        if (!ok) fail("match", "(a) x 4000", "wrong");
+        ok = re_search(re, a, 4000, 0, c, 1200) && c[0] == 0 && c[1] == 4000;
+        for (i = 1; ok && i < 1200; i++) ok = c[2 * i] == i - 1 && c[2 * i + 1] == i;
+        if (!ok) fail("match", "(a) x 4000, 1199 groups", "wrong");
         if (!re_search(re, a, 4000, 0, c, 3) || c[2] != 0 || c[3] != 1 || c[4] != 1 || c[5] != 2)
             fail("match", "(a) x 4000, 2 groups", "wrong");
         free(c);
