@@ -16,6 +16,45 @@ typedef struct {
 static Link *links;
 static int nlinks, clinks;
 
+/* Open-addressing hash over links (slot = index + 1, 0 = empty), so the
+   renderer's per-cell color_get/color_has calls don't scan every link. */
+static int *htab;
+static size_t hcap; /* power of two, > 2 * nlinks */
+
+static size_t hash_n(const char *s, size_t n) {
+    size_t h = 2166136261u, i;
+    for (i = 0; i < n; i++) h = (h ^ (unsigned char)s[i]) * 16777619u;
+    return h;
+}
+
+/* index of the link named s[0..n), or -1 */
+static int find_link(const char *s, size_t n) {
+    size_t i;
+    if (!hcap) return -1;
+    for (i = hash_n(s, n) & (hcap - 1);; i = (i + 1) & (hcap - 1)) {
+        int k = htab[i] - 1;
+        if (k < 0) return -1;
+        if (!strncmp(links[k].name, s, n) && links[k].name[n] == 0) return k;
+    }
+}
+
+static void hash_insert(int k) {
+    size_t i = hash_n(links[k].name, strlen(links[k].name)) & (hcap - 1);
+    while (htab[i]) i = (i + 1) & (hcap - 1);
+    htab[i] = k + 1;
+}
+
+static void hash_grow(void) {
+    int k;
+    size_t want = hcap ? hcap : 64;
+    while (want <= 2 * (size_t)(nlinks + 1)) want *= 2;
+    if (want == hcap) return;
+    hcap = want;
+    free(htab);
+    htab = xcalloc(hcap, sizeof *htab);
+    for (k = 0; k < nlinks; k++) hash_insert(k);
+}
+
 int style_eq(Style a, Style b) { return a.fg == b.fg && a.bg == b.bg && a.attr == b.attr; }
 
 Style style_reverse(Style s) {
@@ -49,7 +88,14 @@ static int string_to_color(const char *s, int *out) {
         }
     }
     if (s[0] == '#' && strlen(s) == 7) {
-        long v = strtol(s + 1, NULL, 16);
+        int i;
+        long v = 0;
+        /* strtol alone would accept "#-12345" or "#12zzzz" (giving negative
+           or truncated values that aren't valid colors) */
+        for (i = 1; i < 7; i++) {
+            if (!isxdigit((unsigned char)s[i])) return 0;
+            v = v * 16 + (isdigit((unsigned char)s[i]) ? s[i] - '0' : tolower((unsigned char)s[i]) - 'a' + 10);
+        }
         *out = (int)((1L << 24) | v);
         return 1;
     }
@@ -92,15 +138,16 @@ static Style string_to_style(const char *str) {
 }
 
 static void set_link(const char *name, Style st) {
-    int i;
-    for (i = 0; i < nlinks; i++)
-        if (!strcmp(links[i].name, name)) { links[i].st = st; return; }
+    int i = find_link(name, strlen(name));
+    if (i >= 0) { links[i].st = st; return; }
     if (nlinks == clinks) {
         clinks = clinks ? clinks * 2 : 64;
         links = xrealloc(links, sizeof *links * (size_t)clinks);
     }
+    hash_grow();
     links[nlinks].name = xstrdup(name);
     links[nlinks].st = st;
+    hash_insert(nlinks);
     nlinks++;
 }
 
@@ -165,30 +212,26 @@ int colorscheme_load(const char *name, char **err) {
     free(probe);
     for (i = 0; i < nlinks; i++) free(links[i].name);
     nlinks = 0;
+    if (htab) memset(htab, 0, hcap * sizeof *htab);
     def_style.fg = def_style.bg = COLOR_DEFAULT;
     def_style.attr = 0;
     return parse_scheme(name, seen, 0, err);
 }
 
 int color_has(const char *group) {
-    int i;
-    for (i = 0; i < nlinks; i++)
-        if (!strcmp(links[i].name, group)) return 1;
-    return 0;
+    return group && find_link(group, strlen(group)) >= 0;
 }
 
 Style color_get(const char *group) {
-    char buf[128];
-    int i;
-    strncpy(buf, group, sizeof buf - 1);
-    buf[sizeof buf - 1] = 0;
-    for (;;) {
-        char *dot;
-        for (i = 0; i < nlinks; i++)
-            if (!strcmp(links[i].name, buf)) return links[i].st;
-        dot = strrchr(buf, '.');
-        if (!dot) break;
-        *dot = 0;
+    size_t n;
+    if (!group) return def_style;
+    /* "a.b.c", then "a.b", then "a" */
+    for (n = strlen(group);;) {
+        int i = find_link(group, n);
+        if (i >= 0) return links[i].st;
+        while (n > 0 && group[n - 1] != '.') n--;
+        if (n == 0) break;
+        n--;
     }
     return def_style;
 }
