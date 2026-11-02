@@ -1,100 +1,307 @@
 /*
- * regex.c - RE2-syntax subset regular expressions (see regex.h).
+ * regex.c - RE2/Go-syntax regular expressions (see regex.h).
+ *
+ * A pattern is parsed into a tree and compiled twice: a forward program
+ * (with capture saves) and a reversed one.  A search runs in up to three
+ * linear-time passes, like RE2:
+ *
+ *   1. a lazily built DFA over the forward program, leftmost-first and
+ *      unanchored, finds where the leftmost-first match ENDS (or proves
+ *      there is none) in one left-to-right scan;
+ *   2. a DFA over the reversed program, longest-match and anchored at that
+ *      end, scans backwards to find where the match STARTS;
+ *   3. only when submatches are wanted, a Pike VM runs between the two.
+ *
+ * DFA states are cached per Regex in bounded memory (the cache is flushed
+ * when full), and a first-byte prefilter (memchr or a byte table) skips
+ * text where no match can start; patterns that are plain strings are
+ * found with memchr/memcmp or KMP.  Matching is iterative, and recursion
+ * over the syntax tree is bounded by MAX_HEIGHT, so neither deeply nested
+ * patterns nor long subjects can exhaust the C stack.
  */
 #include "regex.h"
 #include "util.h"
 
-#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
+#define MAX_NEST   1000      /* parenthesis nesting depth (as Go) */
+#define MAX_HEIGHT (3 * MAX_NEST + 16) /* syntax tree height (bounds recursion) */
+#define MAX_REPEAT 1000      /* bound for {n,m} counts (as Go) */
+#define MAX_PROG   1000000   /* instructions per compiled program */
+#define MAX_CP     0x10FFFF
+#define DFA_BUDGET ((size_t)1 << 20)            /* bytes of cached states per DFA */
+#define PIKE_BUDGET ((size_t)64 << 20)          /* bytes of Pike VM thread state */
+#define LIT_SHORT  32        /* longer literals are searched with KMP */
+
+/* parser flags (RE_ICASE is 1) */
+#define PF_ML      0x100     /* (?m) */
+#define PF_DOTNL   0x200     /* (?s) */
+#define PF_UNGREEDY 0x400    /* (?U) */
+
 /* ------------------------------------------------------------------ */
-/* AST                                                                 */
+/* UTF-8, with Go's rules: overlong forms, surrogates and values above
+   U+10FFFF are invalid, and an invalid byte reads as U+FFFD of width 1. */
 
-enum { N_EMPTY, N_CHAR, N_ANY, N_CLASS, N_CAT, N_ALT, N_REP, N_GROUP, N_ASSERT };
-enum { A_BOL, A_EOL, A_WORDB, A_NWORDB, A_BOT, A_EOT };
+static int dec(const unsigned char *s, int n, int *cp) {
+    int c = s[0], lo = 0x80, hi = 0xBF;
+    if (c < 0x80) { *cp = c; return 1; }
+    *cp = 0xFFFD;
+    if (c < 0xC2 || c > 0xF4) return 1;
+    if (c < 0xE0) {
+        if (n < 2 || s[1] < 0x80 || s[1] > 0xBF) return 1;
+        *cp = ((c & 0x1F) << 6) | (s[1] & 0x3F);
+        return 2;
+    }
+    if (c == 0xE0) lo = 0xA0;
+    else if (c == 0xED) hi = 0x9F;
+    else if (c == 0xF0) lo = 0x90;
+    else if (c == 0xF4) hi = 0x8F;
+    if (n < 2 || s[1] < lo || s[1] > hi) return 1;
+    if (n < 3 || s[2] < 0x80 || s[2] > 0xBF) return 1;
+    if (c < 0xF0) {
+        *cp = ((c & 0x0F) << 12) | ((s[1] & 0x3F) << 6) | (s[2] & 0x3F);
+        return 3;
+    }
+    if (n < 4 || s[3] < 0x80 || s[3] > 0xBF) return 1;
+    *cp = ((c & 0x07) << 18) | ((s[1] & 0x3F) << 12) | ((s[2] & 0x3F) << 6) | (s[3] & 0x3F);
+    return 4;
+}
 
-typedef struct Node {
-    int type;
-    int cp;          /* N_CHAR: code point; N_CLASS: class idx; N_ASSERT: kind; N_ANY: dotnl */
-    int icase;       /* N_CHAR */
-    int min, max;    /* N_REP (max -1 = inf) */
-    int greedy;      /* N_REP */
-    int cap;         /* N_GROUP: capture index or -1 */
-    int multiline;   /* N_ASSERT */
-    struct Node **kids;
-    int nkids, kcap;
-} Node;
+/* decode the character that ends at s[pos-1], not looking before s[lo]
+   (pos > lo); consistent with dec() reading forwards from lo */
+static int dec_last(const unsigned char *s, int lo, int pos, int *cp) {
+    int j = pos - 1, lim = pos - 4 > lo ? pos - 4 : lo, w;
+    if (s[j] < 0x80) { *cp = s[j]; return 1; }
+    while (j > lim && (s[j] & 0xC0) == 0x80) j--;
+    w = dec(s + j, pos - j, cp);
+    if (j + w == pos) return w;
+    *cp = 0xFFFD;
+    return 1;
+}
+
+static int enc(int cp, unsigned char *o) {
+    if (cp < 0x80) { o[0] = (unsigned char)cp; return 1; }
+    if (cp < 0x800) {
+        o[0] = (unsigned char)(0xC0 | (cp >> 6));
+        o[1] = (unsigned char)(0x80 | (cp & 0x3F));
+        return 2;
+    }
+    if (cp < 0x10000) {
+        o[0] = (unsigned char)(0xE0 | (cp >> 12));
+        o[1] = (unsigned char)(0x80 | ((cp >> 6) & 0x3F));
+        o[2] = (unsigned char)(0x80 | (cp & 0x3F));
+        return 3;
+    }
+    o[0] = (unsigned char)(0xF0 | (cp >> 18));
+    o[1] = (unsigned char)(0x80 | ((cp >> 12) & 0x3F));
+    o[2] = (unsigned char)(0x80 | ((cp >> 6) & 0x3F));
+    o[3] = (unsigned char)(0x80 | (cp & 0x3F));
+    return 4;
+}
+
+/* ASCII word characters [0-9A-Za-z_] (\\b is ASCII-only, as in Go) */
+static const unsigned char word_tab[256] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0,
+    0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1,
+    0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0,
+};
+
+static int is_word(int c) {
+    return c >= 0 && c < 256 && word_tab[c];
+}
+
+/* generated by tests/regex_diff/mktables.go from Go's unicode.SimpleFold */
+static const struct { int lo, hi, d; } fold_tab[] = {
+    {0x0041, 0x005A, 32}, {0x0061, 0x006A, -32}, {0x006B, 0x006B, 8383},
+    {0x006C, 0x0072, -32}, {0x0073, 0x0073, 268}, {0x0074, 0x007A, -32},
+    {0x00B5, 0x00B5, 743}, {0x00C0, 0x00D6, 32}, {0x00D8, 0x00DE, 32},
+    {0x00DF, 0x00DF, 7615}, {0x00E0, 0x00E4, -32}, {0x00E5, 0x00E5, 8262},
+    {0x00E6, 0x00F6, -32}, {0x00F8, 0x00FE, -32}, {0x00FF, 0x00FF, 121},
+    {0x0100, 0x012F, 0}, {0x0132, 0x0137, 0}, {0x0139, 0x0148, 0},
+    {0x014A, 0x0177, 0}, {0x0178, 0x0178, -121}, {0x0179, 0x017E, 0},
+    {0x017F, 0x017F, -300}, {0x0180, 0x0180, 195}, {0x0181, 0x0181, 210},
+    {0x0182, 0x0185, 0}, {0x0186, 0x0186, 206}, {0x0187, 0x0188, 0},
+    {0x0189, 0x018A, 205}, {0x018B, 0x018C, 0}, {0x018E, 0x018E, 79},
+    {0x018F, 0x018F, 202}, {0x0190, 0x0190, 203}, {0x0191, 0x0192, 0},
+    {0x0193, 0x0193, 205}, {0x0194, 0x0194, 207}, {0x0195, 0x0195, 97},
+    {0x0196, 0x0196, 211}, {0x0197, 0x0197, 209}, {0x0198, 0x0199, 0},
+    {0x019A, 0x019A, 163}, {0x019C, 0x019C, 211}, {0x019D, 0x019D, 213},
+    {0x019E, 0x019E, 130}, {0x019F, 0x019F, 214}, {0x01A0, 0x01A5, 0},
+    {0x01A6, 0x01A6, 218}, {0x01A7, 0x01A8, 0}, {0x01A9, 0x01A9, 218},
+    {0x01AC, 0x01AD, 0}, {0x01AE, 0x01AE, 218}, {0x01AF, 0x01B0, 0},
+    {0x01B1, 0x01B2, 217}, {0x01B3, 0x01B6, 0}, {0x01B7, 0x01B7, 219},
+    {0x01B8, 0x01B9, 0}, {0x01BC, 0x01BD, 0}, {0x01BF, 0x01BF, 56},
+    {0x01C4, 0x01C5, 1}, {0x01C6, 0x01C6, -2}, {0x01C7, 0x01C8, 1},
+    {0x01C9, 0x01C9, -2}, {0x01CA, 0x01CB, 1}, {0x01CC, 0x01CC, -2},
+    {0x01CD, 0x01DC, 0}, {0x01DD, 0x01DD, -79}, {0x01DE, 0x01EF, 0},
+    {0x01F1, 0x01F2, 1}, {0x01F3, 0x01F3, -2}, {0x01F4, 0x01F5, 0},
+    {0x01F6, 0x01F6, -97}, {0x01F7, 0x01F7, -56}, {0x01F8, 0x021F, 0},
+    {0x0220, 0x0220, -130}, {0x0222, 0x0233, 0}, {0x023A, 0x023A, 10795},
+    {0x023B, 0x023C, 0}, {0x023D, 0x023D, -163}, {0x023E, 0x023E, 10792},
+    {0x023F, 0x0240, 10815}, {0x0241, 0x0242, 0}, {0x0243, 0x0243, -195},
+    {0x0244, 0x0244, 69}, {0x0245, 0x0245, 71}, {0x0246, 0x024F, 0},
+    {0x0250, 0x0250, 10783}, {0x0251, 0x0251, 10780}, {0x0252, 0x0252, 10782},
+    {0x0253, 0x0253, -210}, {0x0254, 0x0254, -206}, {0x0256, 0x0257, -205},
+    {0x0259, 0x0259, -202}, {0x025B, 0x025B, -203}, {0x025C, 0x025C, 42319},
+    {0x0260, 0x0260, -205}, {0x0261, 0x0261, 42315}, {0x0263, 0x0263, -207},
+    {0x0265, 0x0265, 42280}, {0x0266, 0x0266, 42308}, {0x0268, 0x0268, -209},
+    {0x0269, 0x0269, -211}, {0x026A, 0x026A, 42308}, {0x026B, 0x026B, 10743},
+    {0x026C, 0x026C, 42305}, {0x026F, 0x026F, -211}, {0x0271, 0x0271, 10749},
+    {0x0272, 0x0272, -213}, {0x0275, 0x0275, -214}, {0x027D, 0x027D, 10727},
+    {0x0280, 0x0280, -218}, {0x0282, 0x0282, 42307}, {0x0283, 0x0283, -218},
+    {0x0287, 0x0287, 42282}, {0x0288, 0x0288, -218}, {0x0289, 0x0289, -69},
+    {0x028A, 0x028B, -217}, {0x028C, 0x028C, -71}, {0x0292, 0x0292, -219},
+    {0x029D, 0x029D, 42261}, {0x029E, 0x029E, 42258}, {0x0345, 0x0345, 84},
+    {0x0370, 0x0373, 0}, {0x0376, 0x0377, 0}, {0x037B, 0x037D, 130},
+    {0x037F, 0x037F, 116}, {0x0386, 0x0386, 38}, {0x0388, 0x038A, 37},
+    {0x038C, 0x038C, 64}, {0x038E, 0x038F, 63}, {0x0391, 0x03A1, 32},
+    {0x03A3, 0x03A3, 31}, {0x03A4, 0x03AB, 32}, {0x03AC, 0x03AC, -38},
+    {0x03AD, 0x03AF, -37}, {0x03B1, 0x03B1, -32}, {0x03B2, 0x03B2, 30},
+    {0x03B3, 0x03B4, -32}, {0x03B5, 0x03B5, 64}, {0x03B6, 0x03B7, -32},
+    {0x03B8, 0x03B8, 25}, {0x03B9, 0x03B9, 7173}, {0x03BA, 0x03BA, 54},
+    {0x03BB, 0x03BB, -32}, {0x03BC, 0x03BC, -775}, {0x03BD, 0x03BF, -32},
+    {0x03C0, 0x03C0, 22}, {0x03C1, 0x03C1, 48}, {0x03C2, 0x03C2, 1},
+    {0x03C3, 0x03C5, -32}, {0x03C6, 0x03C6, 15}, {0x03C7, 0x03C8, -32},
+    {0x03C9, 0x03C9, 7517}, {0x03CA, 0x03CB, -32}, {0x03CC, 0x03CC, -64},
+    {0x03CD, 0x03CE, -63}, {0x03CF, 0x03CF, 8}, {0x03D0, 0x03D0, -62},
+    {0x03D1, 0x03D1, 35}, {0x03D5, 0x03D5, -47}, {0x03D6, 0x03D6, -54},
+    {0x03D7, 0x03D7, -8}, {0x03D8, 0x03EF, 0}, {0x03F0, 0x03F0, -86},
+    {0x03F1, 0x03F1, -80}, {0x03F2, 0x03F2, 7}, {0x03F3, 0x03F3, -116},
+    {0x03F4, 0x03F4, -92}, {0x03F5, 0x03F5, -96}, {0x03F7, 0x03F8, 0},
+    {0x03F9, 0x03F9, -7}, {0x03FA, 0x03FB, 0}, {0x03FD, 0x03FF, -130},
+    {0x0400, 0x040F, 80}, {0x0410, 0x042F, 32}, {0x0430, 0x0431, -32},
+    {0x0432, 0x0432, 6222}, {0x0433, 0x0433, -32}, {0x0434, 0x0434, 6221},
+    {0x0435, 0x043D, -32}, {0x043E, 0x043E, 6212}, {0x043F, 0x0440, -32},
+    {0x0441, 0x0442, 6210}, {0x0443, 0x0449, -32}, {0x044A, 0x044A, 6204},
+    {0x044B, 0x044F, -32}, {0x0450, 0x045F, -80}, {0x0460, 0x0462, 0},
+    {0x0463, 0x0463, 6180}, {0x0464, 0x0481, 0}, {0x048A, 0x04BF, 0},
+    {0x04C0, 0x04C0, 15}, {0x04C1, 0x04CE, 0}, {0x04CF, 0x04CF, -15},
+    {0x04D0, 0x052F, 0}, {0x0531, 0x0556, 48}, {0x0561, 0x0586, -48},
+    {0x10A0, 0x10C5, 7264}, {0x10C7, 0x10C7, 7264}, {0x10CD, 0x10CD, 7264},
+    {0x10D0, 0x10FA, 3008}, {0x10FD, 0x10FF, 3008}, {0x13A0, 0x13EF, 38864},
+    {0x13F0, 0x13F5, 8}, {0x13F8, 0x13FD, -8}, {0x1C80, 0x1C80, -6254},
+    {0x1C81, 0x1C81, -6253}, {0x1C82, 0x1C82, -6244}, {0x1C83, 0x1C83, -6242},
+    {0x1C84, 0x1C84, 1}, {0x1C85, 0x1C85, -6243}, {0x1C86, 0x1C86, -6236},
+    {0x1C87, 0x1C87, -6181}, {0x1C88, 0x1C88, 35266}, {0x1C90, 0x1CBA, -3008},
+    {0x1CBD, 0x1CBF, -3008}, {0x1D79, 0x1D79, 35332}, {0x1D7D, 0x1D7D, 3814},
+    {0x1D8E, 0x1D8E, 35384}, {0x1E00, 0x1E60, 0}, {0x1E61, 0x1E61, 58},
+    {0x1E62, 0x1E95, 0}, {0x1E9B, 0x1E9B, -59}, {0x1E9E, 0x1E9E, -7615},
+    {0x1EA0, 0x1EFF, 0}, {0x1F00, 0x1F07, 8}, {0x1F08, 0x1F0F, -8},
+    {0x1F10, 0x1F15, 8}, {0x1F18, 0x1F1D, -8}, {0x1F20, 0x1F27, 8},
+    {0x1F28, 0x1F2F, -8}, {0x1F30, 0x1F37, 8}, {0x1F38, 0x1F3F, -8},
+    {0x1F40, 0x1F45, 8}, {0x1F48, 0x1F4D, -8}, {0x1F51, 0x1F51, 8},
+    {0x1F53, 0x1F53, 8}, {0x1F55, 0x1F55, 8}, {0x1F57, 0x1F57, 8},
+    {0x1F59, 0x1F59, -8}, {0x1F5B, 0x1F5B, -8}, {0x1F5D, 0x1F5D, -8},
+    {0x1F5F, 0x1F5F, -8}, {0x1F60, 0x1F67, 8}, {0x1F68, 0x1F6F, -8},
+    {0x1F70, 0x1F71, 74}, {0x1F72, 0x1F75, 86}, {0x1F76, 0x1F77, 100},
+    {0x1F78, 0x1F79, 128}, {0x1F7A, 0x1F7B, 112}, {0x1F7C, 0x1F7D, 126},
+    {0x1F80, 0x1F87, 8}, {0x1F88, 0x1F8F, -8}, {0x1F90, 0x1F97, 8},
+    {0x1F98, 0x1F9F, -8}, {0x1FA0, 0x1FA7, 8}, {0x1FA8, 0x1FAF, -8},
+    {0x1FB0, 0x1FB1, 8}, {0x1FB3, 0x1FB3, 9}, {0x1FB8, 0x1FB9, -8},
+    {0x1FBA, 0x1FBB, -74}, {0x1FBC, 0x1FBC, -9}, {0x1FBE, 0x1FBE, -7289},
+    {0x1FC3, 0x1FC3, 9}, {0x1FC8, 0x1FCB, -86}, {0x1FCC, 0x1FCC, -9},
+    {0x1FD0, 0x1FD1, 8}, {0x1FD8, 0x1FD9, -8}, {0x1FDA, 0x1FDB, -100},
+    {0x1FE0, 0x1FE1, 8}, {0x1FE5, 0x1FE5, 7}, {0x1FE8, 0x1FE9, -8},
+    {0x1FEA, 0x1FEB, -112}, {0x1FEC, 0x1FEC, -7}, {0x1FF3, 0x1FF3, 9},
+    {0x1FF8, 0x1FF9, -128}, {0x1FFA, 0x1FFB, -126}, {0x1FFC, 0x1FFC, -9},
+    {0x2126, 0x2126, -7549}, {0x212A, 0x212A, -8415}, {0x212B, 0x212B, -8294},
+    {0x2132, 0x2132, 28}, {0x214E, 0x214E, -28}, {0x2160, 0x216F, 16},
+    {0x2170, 0x217F, -16}, {0x2183, 0x2184, 0}, {0x24B6, 0x24CF, 26},
+    {0x24D0, 0x24E9, -26}, {0x2C00, 0x2C2F, 48}, {0x2C30, 0x2C5F, -48},
+    {0x2C60, 0x2C61, 0}, {0x2C62, 0x2C62, -10743}, {0x2C63, 0x2C63, -3814},
+    {0x2C64, 0x2C64, -10727}, {0x2C65, 0x2C65, -10795}, {0x2C66, 0x2C66, -10792},
+    {0x2C67, 0x2C6C, 0}, {0x2C6D, 0x2C6D, -10780}, {0x2C6E, 0x2C6E, -10749},
+    {0x2C6F, 0x2C6F, -10783}, {0x2C70, 0x2C70, -10782}, {0x2C72, 0x2C73, 0},
+    {0x2C75, 0x2C76, 0}, {0x2C7E, 0x2C7F, -10815}, {0x2C80, 0x2CE3, 0},
+    {0x2CEB, 0x2CEE, 0}, {0x2CF2, 0x2CF3, 0}, {0x2D00, 0x2D25, -7264},
+    {0x2D27, 0x2D27, -7264}, {0x2D2D, 0x2D2D, -7264}, {0xA640, 0xA64A, 0},
+    {0xA64B, 0xA64B, -35267}, {0xA64C, 0xA66D, 0}, {0xA680, 0xA69B, 0},
+    {0xA722, 0xA72F, 0}, {0xA732, 0xA76F, 0}, {0xA779, 0xA77C, 0},
+    {0xA77D, 0xA77D, -35332}, {0xA77E, 0xA787, 0}, {0xA78B, 0xA78C, 0},
+    {0xA78D, 0xA78D, -42280}, {0xA790, 0xA793, 0}, {0xA794, 0xA794, 48},
+    {0xA796, 0xA7A9, 0}, {0xA7AA, 0xA7AA, -42308}, {0xA7AB, 0xA7AB, -42319},
+    {0xA7AC, 0xA7AC, -42315}, {0xA7AD, 0xA7AD, -42305}, {0xA7AE, 0xA7AE, -42308},
+    {0xA7B0, 0xA7B0, -42258}, {0xA7B1, 0xA7B1, -42282}, {0xA7B2, 0xA7B2, -42261},
+    {0xA7B3, 0xA7B3, 928}, {0xA7B4, 0xA7C3, 0}, {0xA7C4, 0xA7C4, -48},
+    {0xA7C5, 0xA7C5, -42307}, {0xA7C6, 0xA7C6, -35384}, {0xA7C7, 0xA7CA, 0},
+    {0xA7D0, 0xA7D1, 0}, {0xA7D6, 0xA7D9, 0}, {0xA7F5, 0xA7F6, 0},
+    {0xAB53, 0xAB53, -928}, {0xAB70, 0xABBF, -38864}, {0xFF21, 0xFF3A, 32},
+    {0xFF41, 0xFF5A, -32}, {0x10400, 0x10427, 40}, {0x10428, 0x1044F, -40},
+    {0x104B0, 0x104D3, 40}, {0x104D8, 0x104FB, -40}, {0x10570, 0x1057A, 39},
+    {0x1057C, 0x1058A, 39}, {0x1058C, 0x10592, 39}, {0x10594, 0x10595, 39},
+    {0x10597, 0x105A1, -39}, {0x105A3, 0x105B1, -39}, {0x105B3, 0x105B9, -39},
+    {0x105BB, 0x105BC, -39}, {0x10C80, 0x10CB2, 64}, {0x10CC0, 0x10CF2, -64},
+    {0x118A0, 0x118BF, 32}, {0x118C0, 0x118DF, -32}, {0x16E40, 0x16E5F, 32},
+    {0x16E60, 0x16E7F, -32}, {0x1E900, 0x1E921, 34}, {0x1E922, 0x1E943, -34},
+};
+
+/* generated by tests/regex_diff/mktables.go: the names Go accepts in \p{} */
+static const char *const unicode_names[] = {
+    "Adlam", "Ahom", "Anatolian_Hieroglyphs", "Any", "Arabic", "Armenian", "Avestan",
+    "Balinese", "Bamum", "Bassa_Vah", "Batak", "Bengali", "Bhaiksuki", "Bopomofo", "Brahmi",
+    "Braille", "Buginese", "Buhid", "C", "Canadian_Aboriginal", "Carian", "Caucasian_Albanian",
+    "Cc", "Cf", "Chakma", "Cham", "Cherokee", "Chorasmian", "Co", "Common", "Coptic", "Cs",
+    "Cuneiform", "Cypriot", "Cypro_Minoan", "Cyrillic", "Deseret", "Devanagari", "Dives_Akuru",
+    "Dogra", "Duployan", "Egyptian_Hieroglyphs", "Elbasan", "Elymaic", "Ethiopic", "Georgian",
+    "Glagolitic", "Gothic", "Grantha", "Greek", "Gujarati", "Gunjala_Gondi", "Gurmukhi", "Han",
+    "Hangul", "Hanifi_Rohingya", "Hanunoo", "Hatran", "Hebrew", "Hiragana", "Imperial_Aramaic",
+    "Inherited", "Inscriptional_Pahlavi", "Inscriptional_Parthian", "Javanese", "Kaithi",
+    "Kannada", "Katakana", "Kawi", "Kayah_Li", "Kharoshthi", "Khitan_Small_Script", "Khmer",
+    "Khojki", "Khudawadi", "L", "Lao", "Latin", "Lepcha", "Limbu", "Linear_A", "Linear_B",
+    "Lisu", "Ll", "Lm", "Lo", "Lt", "Lu", "Lycian", "Lydian", "M", "Mahajani", "Makasar",
+    "Malayalam", "Mandaic", "Manichaean", "Marchen", "Masaram_Gondi", "Mc", "Me", "Medefaidrin",
+    "Meetei_Mayek", "Mende_Kikakui", "Meroitic_Cursive", "Meroitic_Hieroglyphs", "Miao", "Mn",
+    "Modi", "Mongolian", "Mro", "Multani", "Myanmar", "N", "Nabataean", "Nag_Mundari",
+    "Nandinagari", "Nd", "New_Tai_Lue", "Newa", "Nko", "Nl", "No", "Nushu",
+    "Nyiakeng_Puachue_Hmong", "Ogham", "Ol_Chiki", "Old_Hungarian", "Old_Italic",
+    "Old_North_Arabian", "Old_Permic", "Old_Persian", "Old_Sogdian", "Old_South_Arabian",
+    "Old_Turkic", "Old_Uyghur", "Oriya", "Osage", "Osmanya", "P", "Pahawh_Hmong", "Palmyrene",
+    "Pau_Cin_Hau", "Pc", "Pd", "Pe", "Pf", "Phags_Pa", "Phoenician", "Pi", "Po", "Ps",
+    "Psalter_Pahlavi", "Rejang", "Runic", "S", "Samaritan", "Saurashtra", "Sc", "Sharada",
+    "Shavian", "Siddham", "SignWriting", "Sinhala", "Sk", "Sm", "So", "Sogdian", "Sora_Sompeng",
+    "Soyombo", "Sundanese", "Syloti_Nagri", "Syriac", "Tagalog", "Tagbanwa", "Tai_Le",
+    "Tai_Tham", "Tai_Viet", "Takri", "Tamil", "Tangsa", "Tangut", "Telugu", "Thaana", "Thai",
+    "Tibetan", "Tifinagh", "Tirhuta", "Toto", "Ugaritic", "Vai", "Vithkuqi", "Wancho",
+    "Warang_Citi", "Yezidi", "Yi", "Z", "Zanabazar_Square", "Zl", "Zp", "Zs",
+};
+
+#define FOLD_N ((int)(sizeof fold_tab / sizeof fold_tab[0]))
+
+/* index of the fold_tab entry containing c, or -1 */
+static int fold_find(int c) {
+    int lo = 0, hi = FOLD_N - 1;
+    while (lo <= hi) {
+        int m = lo + (hi - lo) / 2;
+        if (c < fold_tab[m].lo) hi = m - 1;
+        else if (c > fold_tab[m].hi) lo = m + 1;
+        else return m;
+    }
+    return -1;
+}
+
+/* next code point in c's simple case-folding orbit (c itself if none),
+   like Go's unicode.SimpleFold */
+static int fold_next(int c) {
+    int i = fold_find(c);
+    if (i < 0) return c;
+    if (fold_tab[i].d) return c + fold_tab[i].d;
+    return (c - fold_tab[i].lo) % 2 ? c - 1 : c + 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* Character classes                                                   */
 
 typedef struct {
     int lo, hi;
 } Range;
 
 typedef struct {
-    Range *r;
+    Range *r;          /* after class_finish: sorted, disjoint, non-adjacent */
     int n, cap;
-    int neg;
-    int icase;
+    unsigned ascii[4]; /* membership bitmap for code points < 128 */
 } Class;
-
-enum { I_CHAR, I_CHARI, I_ANY, I_ANYNL, I_CLASS, I_SPLIT, I_JMP, I_SAVE, I_ASSERT, I_MATCH };
-
-typedef struct {
-    unsigned char op;
-    unsigned char flag;
-    int x, y;
-} Inst;
-
-struct Regex {
-    Inst *prog;
-    int nprog, cprog;
-    Class *classes;
-    int nclass, cclass;
-    int ncap;
-    int anchored;  /* starts with \A or ^ (non-multiline) */
-    int firstbyte; /* -1 or byte that every match must start with */
-};
-
-typedef struct {
-    const char *p;
-    const char *start;
-    char *err;
-    Regex *re;
-    int ncap;
-    int depth;
-} Parser;
-
-static Node *new_node(int type) {
-    Node *n = xcalloc(1, sizeof *n);
-    n->type = type;
-    n->cap = -1;
-    return n;
-}
-
-static void add_kid(Node *n, Node *k) {
-    if (n->nkids == n->kcap) {
-        n->kcap = n->kcap ? n->kcap * 2 : 4;
-        n->kids = xrealloc(n->kids, sizeof *n->kids * (size_t)n->kcap);
-    }
-    n->kids[n->nkids++] = k;
-}
-
-static void free_node(Node *n) {
-    int i;
-    if (!n) return;
-    for (i = 0; i < n->nkids; i++) free_node(n->kids[i]);
-    free(n->kids);
-    free(n);
-}
-
-static int new_class(Regex *re) {
-    if (re->nclass == re->cclass) {
-        re->cclass = re->cclass ? re->cclass * 2 : 4;
-        re->classes = xrealloc(re->classes, sizeof *re->classes * (size_t)re->cclass);
-    }
-    memset(&re->classes[re->nclass], 0, sizeof(Class));
-    return re->nclass++;
-}
 
 static void class_add(Class *c, int lo, int hi) {
     if (c->n == c->cap) {
@@ -106,36 +313,103 @@ static void class_add(Class *c, int lo, int hi) {
     c->n++;
 }
 
-/* add the complement of ranges [r..r+n) (sorted not required) */
-static void class_add_negated(Class *c, const Range *r, int n) {
-    /* simple approach: sort a copy and add the gaps */
-    Range *t = xmalloc(sizeof *t * (size_t)(n ? n : 1));
-    int i, j, prev = 0;
-    memcpy(t, r, sizeof *t * (size_t)n);
-    for (i = 1; i < n; i++)
-        for (j = i; j > 0 && t[j - 1].lo > t[j].lo; j--) {
-            Range tmp = t[j]; t[j] = t[j - 1]; t[j - 1] = tmp;
+static int range_cmp(const void *a, const void *b) {
+    const Range *x = a, *y = b;
+    return x->lo < y->lo ? -1 : x->lo > y->lo;
+}
+
+/* sort and merge the ranges of c */
+static void class_clean(Class *c) {
+    int i, n = 0;
+    if (c->n < 2) return;
+    qsort(c->r, (size_t)c->n, sizeof *c->r, range_cmp);
+    for (i = 1; i < c->n; i++) {
+        if (c->r[i].lo <= c->r[n].hi + 1) {
+            if (c->r[i].hi > c->r[n].hi) c->r[n].hi = c->r[i].hi;
+        } else {
+            c->r[++n] = c->r[i];
         }
-    for (i = 0; i < n; i++) {
-        if (t[i].lo > prev) class_add(c, prev, t[i].lo - 1);
-        if (t[i].hi + 1 > prev) prev = t[i].hi + 1;
     }
-    if (prev <= 0x10FFFF) class_add(c, prev, 0x10FFFF);
-    free(t);
+    c->n = n + 1;
+}
+
+/* replace the (clean) ranges of c by their complement */
+static void class_negate(Class *c) {
+    Range *old = c->r;
+    int i, n = c->n, prev = 0;
+    c->r = NULL;
+    c->n = c->cap = 0;
+    for (i = 0; i < n; i++) {
+        if (old[i].lo > prev) class_add(c, prev, old[i].lo - 1);
+        prev = old[i].hi + 1;
+    }
+    if (prev <= MAX_CP) class_add(c, prev, MAX_CP);
+    free(old);
+}
+
+/* add [lo,hi] and, if icase, every code point case-equivalent to one in it */
+static void class_add_fold(Class *c, int lo, int hi, int icase) {
+    int i;
+    class_add(c, lo, hi);
+    if (!icase || (lo <= fold_tab[0].lo && hi >= fold_tab[FOLD_N - 1].hi)) return;
+    /* add the orbits of the code points in [lo,hi] that fold */
+    for (i = 0; i < FOLD_N; i++) {
+        int a = fold_tab[i].lo > lo ? fold_tab[i].lo : lo;
+        int b = fold_tab[i].hi < hi ? fold_tab[i].hi : hi, x;
+        for (x = a; x <= b; x++) {
+            int f = fold_next(x), k = 0;
+            while (f != x && ++k < 8) { /* orbits have at most 4 members */
+                class_add(c, f, f);
+                f = fold_next(f);
+            }
+        }
+    }
+}
+
+/* add a set of ranges, case-folded if icase, then negated if neg (the
+   order Go uses for \W, [:^alpha:], \PL and so on) */
+static void class_add_set(Class *c, const Range *r, int n, int neg, int icase) {
+    int i;
+    if (!neg) {
+        for (i = 0; i < n; i++) class_add_fold(c, r[i].lo, r[i].hi, icase);
+    } else {
+        Class t;
+        memset(&t, 0, sizeof t);
+        for (i = 0; i < n; i++) class_add_fold(&t, r[i].lo, r[i].hi, icase);
+        class_clean(&t);
+        class_negate(&t);
+        for (i = 0; i < t.n; i++) class_add(c, t.r[i].lo, t.r[i].hi);
+        free(t.r);
+    }
+}
+
+static void class_finish(Class *c, int neg) {
+    int i, b;
+    class_clean(c);
+    if (neg) class_negate(c);
+    memset(c->ascii, 0, sizeof c->ascii);
+    for (i = 0; i < c->n && c->r[i].lo < 128; i++)
+        for (b = c->r[i].lo; b <= c->r[i].hi && b < 128; b++) c->ascii[b >> 5] |= 1u << (b & 31);
+}
+
+static int class_has(const Class *c, int cp) {
+    int lo = 0, hi = c->n - 1;
+    if (cp < 128) return (c->ascii[cp >> 5] >> (cp & 31)) & 1;
+    while (lo <= hi) {
+        int m = lo + (hi - lo) / 2;
+        if (cp < c->r[m].lo) hi = m - 1;
+        else if (cp > c->r[m].hi) lo = m + 1;
+        else return 1;
+    }
+    return 0;
 }
 
 static const Range r_digit[] = {{'0', '9'}};
 static const Range r_word[] = {{'0', '9'}, {'A', 'Z'}, {'_', '_'}, {'a', 'z'}};
 static const Range r_space[] = {{'\t', '\n'}, {'\f', '\r'}, {' ', ' '}};
 
-static void class_add_set(Class *c, const Range *r, int n, int neg) {
-    int i;
-    if (neg) class_add_negated(c, r, n);
-    else for (i = 0; i < n; i++) class_add(c, r[i].lo, r[i].hi);
-}
-
 /* POSIX [:name:] classes */
-static int posix_class(const char *name, int len, Class *c, int neg) {
+static int posix_class(const char *name, int len, Class *c, int neg, int icase) {
     static const struct { const char *name; Range r[4]; int n; } tbl[] = {
         {"alnum", {{'0', '9'}, {'A', 'Z'}, {'a', 'z'}}, 3},
         {"alpha", {{'A', 'Z'}, {'a', 'z'}}, 2},
@@ -155,67 +429,162 @@ static int posix_class(const char *name, int len, Class *c, int neg) {
     size_t i;
     for (i = 0; i < sizeof tbl / sizeof tbl[0]; i++) {
         if ((int)strlen(tbl[i].name) == len && !strncmp(tbl[i].name, name, (size_t)len)) {
-            class_add_set(c, tbl[i].r, tbl[i].n, neg);
+            class_add_set(c, tbl[i].r, tbl[i].n, neg, icase);
             return 1;
         }
     }
     return 0;
 }
 
-/* Approximate Unicode classes (\pL, \p{Greek}, ...) */
-static int unicode_class(const char *name, int len, Class *c, int neg) {
-    Range r[8];
-    int n = 0;
-#define IS(s) ((int)strlen(s) == len && !strncmp(name, s, (size_t)len))
-    if (IS("L") || IS("Letter")) {
-        r[n].lo = 'A'; r[n++].hi = 'Z'; r[n].lo = 'a'; r[n++].hi = 'z';
-        r[n].lo = 0xAA; r[n++].hi = 0xAA; r[n].lo = 0xB5; r[n++].hi = 0xB5;
-        r[n].lo = 0xC0; r[n++].hi = 0xD6; r[n].lo = 0xD8; r[n++].hi = 0xF6;
-        r[n].lo = 0xF8; r[n++].hi = 0x2FF; r[n].lo = 0x370; r[n++].hi = 0x10FFFF;
-    } else if (IS("Lu")) {
-        r[n].lo = 'A'; r[n++].hi = 'Z'; r[n].lo = 0xC0; r[n++].hi = 0xD6;
-        r[n].lo = 0xD8; r[n++].hi = 0xDE; r[n].lo = 0x391; r[n++].hi = 0x3A9;
-        r[n].lo = 0x410; r[n++].hi = 0x42F;
-    } else if (IS("Ll")) {
-        r[n].lo = 'a'; r[n++].hi = 'z'; r[n].lo = 0xDF; r[n++].hi = 0xF6;
-        r[n].lo = 0xF8; r[n++].hi = 0xFF; r[n].lo = 0x3B1; r[n++].hi = 0x3C9;
-        r[n].lo = 0x430; r[n++].hi = 0x44F;
-    } else if (IS("N") || IS("Nd")) {
-        r[n].lo = '0'; r[n++].hi = '9'; r[n].lo = 0x660; r[n++].hi = 0x669;
-        r[n].lo = 0xFF10; r[n++].hi = 0xFF19;
-    } else if (IS("Greek")) {
-        r[n].lo = 0x370; r[n++].hi = 0x3FF; r[n].lo = 0x1F00; r[n++].hi = 0x1FFF;
-    } else if (IS("Cyrillic")) {
-        r[n].lo = 0x400; r[n++].hi = 0x52F;
-    } else if (IS("Han")) {
-        r[n].lo = 0x2E80; r[n++].hi = 0x2FDF; r[n].lo = 0x3400; r[n++].hi = 0x4DBF;
-        r[n].lo = 0x4E00; r[n++].hi = 0x9FFF; r[n].lo = 0xF900; r[n++].hi = 0xFAFF;
-    } else if (IS("Hiragana")) {
-        r[n].lo = 0x3040; r[n++].hi = 0x309F;
-    } else if (IS("Katakana")) {
-        r[n].lo = 0x30A0; r[n++].hi = 0x30FF;
-    } else if (IS("Latin")) {
-        r[n].lo = 'A'; r[n++].hi = 'Z'; r[n].lo = 'a'; r[n++].hi = 'z';
-        r[n].lo = 0xC0; r[n++].hi = 0x24F;
-    } else if (IS("P") || IS("Punct")) {
-        r[n].lo = '!'; r[n++].hi = '/'; r[n].lo = ':'; r[n++].hi = '@';
-        r[n].lo = '['; r[n++].hi = '`'; r[n].lo = '{'; r[n++].hi = '~';
-        r[n].lo = 0x2010; r[n++].hi = 0x2027;
-    } else if (IS("Z") || IS("Zs")) {
-        r[n].lo = ' '; r[n++].hi = ' '; r[n].lo = 0xA0; r[n++].hi = 0xA0;
-        r[n].lo = 0x2000; r[n++].hi = 0x200A; r[n].lo = 0x3000; r[n++].hi = 0x3000;
-    } else if (IS("S") || IS("Sm") || IS("So")) {
-        r[n].lo = '$'; r[n++].hi = '$'; r[n].lo = '+'; r[n++].hi = '+';
-        r[n].lo = '<'; r[n++].hi = '>'; r[n].lo = '^'; r[n++].hi = '^';
-        r[n].lo = '|'; r[n++].hi = '|'; r[n].lo = '~'; r[n++].hi = '~';
-        r[n].lo = 0x2190; r[n++].hi = 0x2BFF;
-    } else {
-        /* unknown script/category: approximate as "any non-ASCII" */
-        r[n].lo = 0x80; r[n++].hi = 0x10FFFF;
+/* Unicode classes (\pL, \p{Greek}, ...): the names Go accepts, with
+   approximate code point ranges.  Returns 0 for an unknown name. */
+static int unicode_class(const char *name, int len, Class *c, int neg, int icase) {
+    Range r[10];
+    int n = 0, lo = 0, hi = (int)(sizeof unicode_names / sizeof unicode_names[0]) - 1;
+    while (lo <= hi) {
+        int m = lo + (hi - lo) / 2, k = strncmp(unicode_names[m], name, (size_t)len);
+        if (!k && unicode_names[m][len]) k = 1;
+        if (k > 0) hi = m - 1;
+        else if (k < 0) lo = m + 1;
+        else break;
     }
+    if (lo > hi) return 0;
+#define IS(s) ((int)strlen(s) == len && !strncmp(name, s, (size_t)len))
+#define R(a, b) (r[n].lo = (a), r[n++].hi = (b))
+    if (IS("Any")) {
+        R(0, MAX_CP);
+    } else if (IS("L")) {
+        R('A', 'Z'); R('a', 'z'); R(0xAA, 0xAA); R(0xB5, 0xB5); R(0xBA, 0xBA);
+        R(0xC0, 0xD6); R(0xD8, 0xF6); R(0xF8, 0x2FF); R(0x370, 0xFFFC); R(0x10000, MAX_CP);
+    } else if (IS("Lu")) {
+        R('A', 'Z'); R(0xC0, 0xD6); R(0xD8, 0xDE); R(0x391, 0x3A9); R(0x410, 0x42F);
+    } else if (IS("Ll")) {
+        R('a', 'z'); R(0xDF, 0xF6); R(0xF8, 0xFF); R(0x3B1, 0x3C9); R(0x430, 0x44F);
+    } else if (IS("N") || IS("Nd")) {
+        R('0', '9'); R(0x660, 0x669); R(0xFF10, 0xFF19);
+    } else if (IS("Greek")) {
+        R(0x370, 0x3FF); R(0x1F00, 0x1FFF);
+    } else if (IS("Cyrillic")) {
+        R(0x400, 0x52F);
+    } else if (IS("Han")) {
+        R(0x2E80, 0x2FDF); R(0x3400, 0x4DBF); R(0x4E00, 0x9FFF); R(0xF900, 0xFAFF);
+    } else if (IS("Hiragana")) {
+        R(0x3040, 0x309F);
+    } else if (IS("Katakana")) {
+        R(0x30A0, 0x30FF);
+    } else if (IS("Latin")) {
+        R('A', 'Z'); R('a', 'z'); R(0xC0, 0x24F);
+    } else if (IS("P")) {
+        R('!', '/'); R(':', '@'); R('[', '`'); R('{', '~'); R(0x2010, 0x2027);
+    } else if (IS("Z") || IS("Zs")) {
+        R(' ', ' '); R(0xA0, 0xA0); R(0x2000, 0x200A); R(0x3000, 0x3000);
+    } else if (IS("S") || IS("Sm") || IS("So")) {
+        R('$', '$'); R('+', '+'); R('<', '>'); R('^', '^'); R('|', '|'); R('~', '~');
+        R(0x2190, 0x2BFF); R(0xFFFC, 0xFFFD); /* U+FFFD: what invalid bytes read as */
+    } else {
+        /* other scripts and categories: approximated as "any non-ASCII" */
+        R(0x80, MAX_CP);
+    }
+#undef R
 #undef IS
-    class_add_set(c, r, n, neg);
+    class_add_set(c, r, n, neg, icase);
     return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* Syntax tree                                                         */
+
+enum { N_EMPTY, N_CHAR, N_ANY, N_CLASS, N_CAT, N_ALT, N_REP, N_GROUP, N_ASSERT };
+enum { A_BOL, A_EOL, A_WORDB, A_NWORDB, A_BOT, A_EOT };
+
+typedef struct Node {
+    int type;
+    int cp;          /* N_CHAR: code point; N_CLASS: class index; N_ASSERT: kind;
+                        N_ANY: 1 if it matches \n */
+    int icase;       /* N_CHAR: ASCII letter, either case */
+    int min, max;    /* N_REP (max -1 = unbounded) */
+    int greedy;      /* N_REP */
+    int cap;         /* N_GROUP: capture index or -1 */
+    int ml;          /* N_ASSERT: (?m) ^ or $ */
+    int height;      /* 1 + height of the tallest kid */
+    struct Node **kids;
+    int nkids, kcap;
+} Node;
+
+enum { I_CHAR, I_CHARI, I_ANY, I_ANYNL, I_CLASS, I_SPLIT, I_JMP, I_SAVE, I_ASSERT, I_MATCH };
+
+typedef struct {
+    unsigned char op;
+    unsigned char flag; /* I_ASSERT: multi-line */
+    int x, y;
+} Inst;
+
+typedef struct {
+    Inst *ins;
+    int n, cap;
+} Prog;
+
+typedef struct DFA DFA;
+
+struct Regex {
+    Prog fwd, rev;
+    Class *classes;
+    int nclass, cclass;
+    int ncap;
+    int anchored;            /* every match starts at offset 0 */
+    int ctxfree;             /* see re_context_free() */
+    unsigned char *lit;      /* whole pattern is this literal string ... */
+    int nlit;                /* ... of nlit bytes (no groups), else 0 */
+    int *kmp;                /* KMP failure function, for long literals */
+    int pf;                  /* prefilter: 0 none, 1 byte, 2 byte set */
+    int pfbyte;
+    unsigned char pftab[256]; /* 1 for bytes a match can start with */
+    int wordstart;           /* no match starts inside a word (\b...) */
+    DFA *dfa[2];             /* forward, reverse; built on first use */
+};
+
+typedef struct {
+    const char *p;
+    const char *start;
+    char *err;
+    Regex *re;
+    int ncap;
+    int depth;
+} Parser;
+
+static Node *new_node(int type) {
+    Node *n = xcalloc(1, sizeof *n);
+    n->type = type;
+    n->cap = -1;
+    n->height = 1;
+    return n;
+}
+
+static void add_kid(Node *n, Node *k) {
+    if (n->nkids == n->kcap) {
+        n->kcap = n->kcap ? n->kcap * 2 : 4;
+        n->kids = xrealloc(n->kids, sizeof *n->kids * (size_t)n->kcap);
+    }
+    n->kids[n->nkids++] = k;
+    if (k->height >= n->height) n->height = k->height + 1;
+}
+
+/* recursion over the tree is bounded by MAX_HEIGHT */
+static void free_node(Node *n) {
+    int i;
+    if (!n) return;
+    for (i = 0; i < n->nkids; i++) free_node(n->kids[i]);
+    free(n->kids);
+    free(n);
+}
+
+static int new_class(Regex *re) {
+    if (re->nclass == re->cclass) {
+        re->cclass = re->cclass ? re->cclass * 2 : 4;
+        re->classes = xrealloc(re->classes, sizeof *re->classes * (size_t)re->cclass);
+    }
+    memset(&re->classes[re->nclass], 0, sizeof(Class));
+    return re->nclass++;
 }
 
 static int hexval(int c) {
@@ -225,56 +594,98 @@ static int hexval(int c) {
     return -1;
 }
 
+static int is_alnum(int c) {
+    return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+}
+
 static void set_err(Parser *ps, const char *msg) {
     if (!ps->err) ps->err = xsprintf("%s at offset %d", msg, (int)(ps->p - ps->start));
 }
 
-/* Parse an escape after '\'.  Returns code point >= 0 for a literal,
- * or -2 if it added a class into *cls (when cls != NULL), or -3 for an
- * assertion (stored in *assert_kind), -1 on error. */
-static int parse_escape(Parser *ps, Class *cls, int *assert_kind) {
+/* next code point of the pattern (invalid UTF-8 reads as U+FFFD) */
+static int pat_rune(Parser *ps) {
+    int cp, n = 0;
+    while (n < 4 && ps->p[n]) n++;
+    ps->p += dec((const unsigned char *)ps->p, n, &cp);
+    return cp;
+}
+
+/* a literal code point, or for (?i) the class of its case variants */
+static Node *lit_node(Parser *ps, int cp, int flags) {
+    Node *n;
+    if ((flags & RE_ICASE) && fold_next(cp) != cp) {
+        if (cp < 128 && fold_next(fold_next(cp)) == cp) {
+            n = new_node(N_CHAR);
+            n->cp = cp | 0x20;  /* ASCII letter: lower case */
+            n->icase = 1;
+            return n;
+        } else {
+            int idx = new_class(ps->re), c = cp, k = 0;
+            Class *cl = &ps->re->classes[idx];
+            do {
+                class_add(cl, c, c);
+                c = fold_next(c);
+            } while (c != cp && ++k < 8); /* orbits have at most 4 members */
+            class_finish(cl, 0);
+            n = new_node(N_CLASS);
+            n->cp = idx;
+            return n;
+        }
+    }
+    n = new_node(N_CHAR);
+    n->cp = cp;
+    return n;
+}
+
+/* Parse an escape after '\'.  Returns a code point >= 0 for a literal,
+ * -2 if it added a class into *cls (when cls != NULL), -3 for an assertion
+ * (stored in *assert_kind, when non-NULL), or -1 on error. */
+static int parse_escape(Parser *ps, Class *cls, int *assert_kind, int icase) {
     int c = (unsigned char)*ps->p;
     if (!c) { set_err(ps, "trailing backslash"); return -1; }
     ps->p++;
     switch (c) {
     case 'd': case 'D':
-        if (!cls) return -1;
-        class_add_set(cls, r_digit, 1, c == 'D');
+        if (!cls) break;
+        class_add_set(cls, r_digit, 1, c == 'D', icase);
         return -2;
     case 'w': case 'W':
-        if (!cls) return -1;
-        class_add_set(cls, r_word, 4, c == 'W');
+        if (!cls) break;
+        class_add_set(cls, r_word, 4, c == 'W', icase);
         return -2;
     case 's': case 'S':
-        if (!cls) return -1;
-        class_add_set(cls, r_space, 3, c == 'S');
+        if (!cls) break;
+        class_add_set(cls, r_space, 3, c == 'S', icase);
         return -2;
     case 'p': case 'P': {
         const char *name;
-        int len;
-        if (!cls) return -1;
+        int len, neg = c == 'P';
+        if (!cls) break;
         if (*ps->p == '{') {
             const char *e = strchr(ps->p, '}');
-            if (!e) { set_err(ps, "bad \\p"); return -1; }
+            if (!e) { set_err(ps, "invalid character class range"); return -1; }
             name = ps->p + 1;
             len = (int)(e - name);
             ps->p = e + 1;
-        } else {
+        } else if (*ps->p) {
             name = ps->p;
-            len = 1;
-            if (*ps->p) ps->p++;
+            pat_rune(ps);
+            len = (int)(ps->p - name);
+        } else {
+            set_err(ps, "invalid character class range");
+            return -1;
         }
-        {
-            int neg = (c == 'P');
-            if (len > 0 && name[0] == '^') { neg = !neg; name++; len--; }
-            unicode_class(name, len, cls, neg);
+        if (len > 0 && name[0] == '^') { neg = !neg; name++; len--; }
+        if (!unicode_class(name, len, cls, neg, icase)) {
+            set_err(ps, "invalid character class range");
+            return -1;
         }
         return -2;
     }
     case 'b': if (assert_kind) { *assert_kind = A_WORDB; return -3; } return 8;
-    case 'B': if (assert_kind) { *assert_kind = A_NWORDB; return -3; } return -1;
-    case 'A': if (assert_kind) { *assert_kind = A_BOT; return -3; } return -1;
-    case 'z': if (assert_kind) { *assert_kind = A_EOT; return -3; } return -1;
+    case 'B': if (assert_kind) { *assert_kind = A_NWORDB; return -3; } break;
+    case 'A': if (assert_kind) { *assert_kind = A_BOT; return -3; } break;
+    case 'z': if (assert_kind) { *assert_kind = A_EOT; return -3; } break;
     case 'n': return '\n';
     case 't': return '\t';
     case 'r': return '\r';
@@ -283,306 +694,333 @@ static int parse_escape(Parser *ps, Class *cls, int *assert_kind) {
     case 'a': return 7;
     case 'e': return 27;
     case 'x': {
-        int v = 0, h;
+        int v = 0, h, n = 0;
         if (*ps->p == '{') {
             ps->p++;
-            while ((h = hexval((unsigned char)*ps->p)) >= 0) { v = v * 16 + h; ps->p++; }
-            if (*ps->p != '}') { set_err(ps, "bad \\x{}"); return -1; }
+            while ((h = hexval((unsigned char)*ps->p)) >= 0) {
+                v = v * 16 + h;
+                ps->p++;
+                n++;
+                if (v > MAX_CP) break;
+            }
+            if (*ps->p != '}' || !n || v > MAX_CP) break;
             ps->p++;
             return v;
         }
         h = hexval((unsigned char)*ps->p);
-        if (h < 0) { set_err(ps, "bad \\x"); return -1; }
+        if (h < 0) break;
         v = h; ps->p++;
         h = hexval((unsigned char)*ps->p);
-        if (h < 0) { set_err(ps, "bad \\x"); return -1; }
-        v = v * 16 + h; ps->p++;
-        return v;
+        if (h < 0) break;
+        ps->p++;
+        return v * 16 + h;
     }
-    case '0': case '1': case '2': case '3': case '4': case '5': case '6': case '7': {
+    case '1': case '2': case '3': case '4': case '5': case '6': case '7':
+        /* a single non-zero digit would be a backreference: unsupported */
+        if (*ps->p < '0' || *ps->p > '7') break;
+        /* fall through */
+    case '0': {
         int v = c - '0', k;
         for (k = 0; k < 2 && *ps->p >= '0' && *ps->p <= '7'; k++) v = v * 8 + (*ps->p++ - '0');
         return v;
     }
     default:
-        if (isalnum(c)) { set_err(ps, "invalid escape"); return -1; }
-        /* punctuation or utf-8 byte: literal */
-        if (c >= 0x80) {
-            int cp, n;
-            ps->p--;
-            n = utf8_decode(ps->p, (int)strlen(ps->p), &cp);
-            ps->p += n;
-            return cp;
+        if (c < 0x80) {
+            if (is_alnum(c)) break;
+            return c; /* escaped punctuation */
         }
-        return c;
+        ps->p--;
+        return pat_rune(ps); /* escaped non-ASCII character */
     }
+    set_err(ps, "invalid escape sequence");
+    return -1;
 }
 
 static Node *parse_alt(Parser *ps, int *flags);
 
 static Node *parse_class(Parser *ps, int flags) {
     Node *n;
-    int idx = new_class(ps->re);
+    int idx = new_class(ps->re), neg = 0, first = 1, icase = (flags & RE_ICASE) != 0;
     Class *c;
-    int first = 1;
     /* ps->p points after '[' */
-    c = &ps->re->classes[idx];
-    if (*ps->p == '^') { c->neg = 1; ps->p++; }
-    c->icase = (flags & RE_ICASE) != 0;
+    if (*ps->p == '^') { neg = 1; ps->p++; }
     for (;;) {
         int lo, hi;
         c = &ps->re->classes[idx];
-        if (!*ps->p) { set_err(ps, "missing ]"); return NULL; }
+        if (!*ps->p) { set_err(ps, "missing closing ]"); return NULL; }
         if (*ps->p == ']' && !first) { ps->p++; break; }
         first = 0;
         if (ps->p[0] == '[' && ps->p[1] == ':') {
             const char *e = strstr(ps->p + 2, ":]");
             if (e) {
                 const char *name = ps->p + 2;
-                int neg = 0;
-                if (*name == '^') { neg = 1; name++; }
-                if (posix_class(name, (int)(e - name), c, neg)) {
-                    ps->p = e + 2;
-                    continue;
+                int pneg = 0;
+                if (*name == '^') { pneg = 1; name++; }
+                if (!posix_class(name, (int)(e - name), c, pneg, icase)) {
+                    set_err(ps, "invalid character class range");
+                    return NULL;
                 }
+                ps->p = e + 2;
+                continue;
             }
         }
         if (*ps->p == '\\') {
             ps->p++;
-            lo = parse_escape(ps, c, NULL);
+            lo = parse_escape(ps, c, NULL, icase);
             if (lo == -2) continue;
-            if (lo < 0) { if (!ps->err) set_err(ps, "bad escape in class"); return NULL; }
+            if (lo < 0) return NULL;
         } else {
-            int n2 = utf8_decode(ps->p, (int)strlen(ps->p), &lo);
-            ps->p += n2;
+            lo = pat_rune(ps);
         }
         hi = lo;
         if (ps->p[0] == '-' && ps->p[1] && ps->p[1] != ']') {
             ps->p++;
             if (*ps->p == '\\') {
                 ps->p++;
-                hi = parse_escape(ps, NULL, NULL);
-                if (hi < 0) { if (!ps->err) set_err(ps, "bad range"); return NULL; }
+                hi = parse_escape(ps, NULL, NULL, 0);
+                if (hi < 0) return NULL;
             } else {
-                int n2 = utf8_decode(ps->p, (int)strlen(ps->p), &hi);
-                ps->p += n2;
+                hi = pat_rune(ps);
             }
-            if (hi < lo) { set_err(ps, "invalid class range"); return NULL; }
+            if (hi < lo) { set_err(ps, "invalid character class range"); return NULL; }
         }
-        class_add(c, lo, hi);
+        class_add_fold(c, lo, hi, icase);
     }
+    class_finish(&ps->re->classes[idx], neg);
     n = new_node(N_CLASS);
     n->cp = idx;
     return n;
 }
 
-static int parse_int(Parser *ps, int *out) {
-    int v = 0, any = 0;
-    while (*ps->p >= '0' && *ps->p <= '9') { v = v * 10 + (*ps->p++ - '0'); any = 1; if (v > 100000) v = 100000; }
+/* decimal number as Go parses it in {n,m}: no leading zeros; -1 if huge */
+static int parse_int(const char **pp, int *out) {
+    const char *p = *pp;
+    int v = 0;
+    if (*p < '0' || *p > '9') return 0;
+    if (p[0] == '0' && p[1] >= '0' && p[1] <= '9') return 0;
+    while (*p >= '0' && *p <= '9') {
+        if (v >= 100000000) v = -1;
+        if (v >= 0) v = v * 10 + (*p - '0');
+        p++;
+    }
+    *pp = p;
     *out = v;
-    return any;
+    return 1;
 }
 
-static Node *parse_atom(Parser *ps, int *flags) {
+/* a repetition operator at p?  Sets min, max (-1: none) and *after.  An
+   unparsable '{' is not one (it is then a literal). */
+static int repeat_op(const char *p, int *min, int *max, const char **after) {
+    switch (*p) {
+    case '*': *min = 0; *max = -1; *after = p + 1; return 1;
+    case '+': *min = 1; *max = -1; *after = p + 1; return 1;
+    case '?': *min = 0; *max = 1; *after = p + 1; return 1;
+    case '{':
+        p++;
+        if (!parse_int(&p, min)) return 0;
+        if (*p == ',') {
+            p++;
+            if (*p == '}') *max = -1;
+            else if (!parse_int(&p, max)) return 0;
+            else if (*max < 0) *min = -1;
+        } else {
+            *max = *min;
+        }
+        if (*p != '}') return 0;
+        *after = p + 1;
+        return 1;
+    }
+    return 0;
+}
+
+/* Go's limit on nested counted repetition: (a{500}){3} is too big */
+static int repeat_valid(const Node *n, int lim) {
+    int i;
+    if (n->type == N_REP) {
+        int m = n->max;
+        if (m == 0) return 1;
+        if (m < 0) m = n->min;
+        if (m > lim) return 0;
+        if (m > 0) lim /= m;
+    }
+    for (i = 0; i < n->nkids; i++)
+        if (!repeat_valid(n->kids[i], lim)) return 0;
+    return 1;
+}
+
+/* Parse one atom and append it to cat.  Returns 1 if a node was added, 0
+ * if none was (a flag group like (?i), or an empty \Q\E), -1 on error. */
+static int parse_atom(Parser *ps, int *flags, Node *cat) {
     int c = (unsigned char)*ps->p;
     Node *n;
     if (c == '(') {
+        int cap = -1, f2 = *flags;
+        Node *k;
         ps->p++;
-        if (++ps->depth > 500) { set_err(ps, "nesting too deep"); return NULL; }
+        if (++ps->depth > MAX_NEST) { set_err(ps, "expression nests too deeply"); return -1; }
         if (*ps->p == '?') {
-            /* (?:...), (?flags), (?flags:...), (?P<name>...) */
-            int newflags = *flags, on = 1;
             ps->p++;
-            if (*ps->p == 'P' || *ps->p == '<') {
-                const char *e;
-                int cap;
+            if (*ps->p == '<' || (ps->p[0] == 'P' && ps->p[1] == '<')) {
+                /* (?P<name>...) or (?<name>...) */
+                const char *name;
                 if (*ps->p == 'P') ps->p++;
-                if (*ps->p != '<') { set_err(ps, "bad named group"); return NULL; }
-                e = strchr(ps->p, '>');
-                if (!e) { set_err(ps, "bad named group"); return NULL; }
-                ps->p = e + 1;
+                name = ++ps->p;
+                while (is_alnum((unsigned char)*ps->p) || *ps->p == '_') ps->p++;
+                if (*ps->p != '>' || ps->p == name) { set_err(ps, "invalid named capture"); return -1; }
+                ps->p++;
                 cap = ps->ncap++;
-                n = new_node(N_GROUP);
-                n->cap = cap;
-                {
-                    int f2 = *flags;
-                    Node *k = parse_alt(ps, &f2);
-                    if (!k) { free_node(n); return NULL; }
-                    add_kid(n, k);
+            } else {
+                /* flags: (?i) (?i-s) (?i:...) */
+                int on = 1, saw = 0;
+                for (;;) {
+                    int bit = 0;
+                    c = (unsigned char)*ps->p++;
+                    if (c == 'i') bit = RE_ICASE;
+                    else if (c == 'm') bit = PF_ML;
+                    else if (c == 's') bit = PF_DOTNL;
+                    else if (c == 'U') bit = PF_UNGREEDY;
+                    if (bit) {
+                        f2 = on ? (f2 | bit) : (f2 & ~bit);
+                        saw = 1;
+                    } else if (c == '-' && on) {
+                        on = 0;
+                        saw = 0;
+                    } else if ((c == ')' || c == ':') && (on || saw)) {
+                        break;
+                    } else {
+                        ps->p--;
+                        set_err(ps, "invalid or unsupported Perl syntax");
+                        return -1;
+                    }
                 }
-                if (*ps->p != ')') { set_err(ps, "missing )"); free_node(n); return NULL; }
-                ps->p++;
-                ps->depth--;
-                return n;
+                if (c == ')') {
+                    *flags = f2; /* applies to the rest of the current group */
+                    ps->depth--;
+                    return 0;
+                }
             }
-            for (;;) {
-                c = (unsigned char)*ps->p;
-                if (c == '-') { on = 0; ps->p++; continue; }
-                if (c == 'i') { newflags = on ? (newflags | RE_ICASE) : (newflags & ~RE_ICASE); ps->p++; continue; }
-                if (c == 'm') { newflags = on ? (newflags | 0x100) : (newflags & ~0x100); ps->p++; continue; }
-                if (c == 's') { newflags = on ? (newflags | 0x200) : (newflags & ~0x200); ps->p++; continue; }
-                if (c == 'U') { newflags = on ? (newflags | 0x400) : (newflags & ~0x400); ps->p++; continue; }
-                break;
-            }
-            if (*ps->p == ')') {
-                ps->p++;
-                *flags = newflags; /* applies to rest of current group */
-                ps->depth--;
-                return new_node(N_EMPTY);
-            }
-            if (*ps->p == ':') {
-                Node *k;
-                ps->p++;
-                k = parse_alt(ps, &newflags);
-                if (!k) return NULL;
-                if (*ps->p != ')') { set_err(ps, "missing )"); free_node(k); return NULL; }
-                ps->p++;
-                ps->depth--;
-                n = new_node(N_GROUP);
-                n->cap = -1;
-                add_kid(n, k);
-                return n;
-            }
-            set_err(ps, "invalid or unsupported group syntax");
-            return NULL;
         } else {
-            int cap = ps->ncap++;
-            int f2 = *flags;
-            Node *k = parse_alt(ps, &f2);
-            if (!k) return NULL;
-            if (*ps->p != ')') { set_err(ps, "missing )"); free_node(k); return NULL; }
-            ps->p++;
-            ps->depth--;
-            n = new_node(N_GROUP);
-            n->cap = cap;
-            add_kid(n, k);
-            return n;
+            cap = ps->ncap++;
         }
+        k = parse_alt(ps, &f2);
+        if (!k) return -1;
+        if (*ps->p != ')') { set_err(ps, "missing closing )"); free_node(k); return -1; }
+        ps->p++;
+        ps->depth--;
+        n = new_node(N_GROUP);
+        n->cap = cap;
+        add_kid(n, k);
+        add_kid(cat, n);
+        if (cat->height > MAX_HEIGHT) { set_err(ps, "expression nests too deeply"); return -1; }
+        return 1;
     }
     if (c == '[') {
         ps->p++;
-        return parse_class(ps, *flags);
+        n = parse_class(ps, *flags);
+        if (!n) return -1;
+        add_kid(cat, n);
+        return 1;
     }
     if (c == '.') {
         ps->p++;
         n = new_node(N_ANY);
-        n->cp = (*flags & 0x200) != 0;
-        return n;
+        n->cp = (*flags & PF_DOTNL) != 0;
+        add_kid(cat, n);
+        return 1;
     }
     if (c == '^' || c == '$') {
         ps->p++;
         n = new_node(N_ASSERT);
         n->cp = c == '^' ? A_BOL : A_EOL;
-        n->multiline = (*flags & 0x100) != 0;
-        return n;
+        n->ml = (*flags & PF_ML) != 0;
+        add_kid(cat, n);
+        return 1;
     }
     if (c == '\\') {
-        int ak = -1, v;
+        int ak = -1, v, added = 0;
         Class tmp;
-        memset(&tmp, 0, sizeof tmp);
         ps->p++;
         if (*ps->p == 'Q') {
-            /* \Q...\E literal */
+            /* \Q...\E: literal text; a following repetition applies to its
+               last character only, as in Go */
             const char *e;
-            Node *cat = new_node(N_CAT);
             ps->p++;
             e = strstr(ps->p, "\\E");
             if (!e) e = ps->p + strlen(ps->p);
             while (ps->p < e) {
-                int cp, k = utf8_decode(ps->p, (int)(e - ps->p), &cp);
-                Node *ch = new_node(N_CHAR);
-                ch->cp = cp;
-                ch->icase = (*flags & RE_ICASE) != 0;
-                add_kid(cat, ch);
-                ps->p += k;
+                add_kid(cat, lit_node(ps, pat_rune(ps), *flags));
+                added = 1;
             }
             if (*ps->p) ps->p += 2;
-            return cat;
+            return added;
         }
-        v = parse_escape(ps, &tmp, &ak);
+        memset(&tmp, 0, sizeof tmp);
+        v = parse_escape(ps, &tmp, &ak, (*flags & RE_ICASE) != 0);
         if (v == -3) {
-            free(tmp.r);
             n = new_node(N_ASSERT);
             n->cp = ak;
-            return n;
-        }
-        if (v == -2) {
+        } else if (v == -2) {
             int idx = new_class(ps->re);
+            class_finish(&tmp, 0);
             ps->re->classes[idx] = tmp;
-            ps->re->classes[idx].icase = (*flags & RE_ICASE) != 0;
             n = new_node(N_CLASS);
             n->cp = idx;
-            return n;
+            tmp.r = NULL;
+        } else if (v >= 0) {
+            n = lit_node(ps, v, *flags);
+        } else {
+            n = NULL;
         }
         free(tmp.r);
-        if (v < 0) { if (!ps->err) set_err(ps, "bad escape"); return NULL; }
-        n = new_node(N_CHAR);
-        n->cp = v;
-        n->icase = (*flags & RE_ICASE) != 0;
-        return n;
+        if (!n) return -1;
+        add_kid(cat, n);
+        return 1;
     }
-    {
-        int cp, k = utf8_decode(ps->p, (int)strlen(ps->p), &cp);
-        ps->p += k;
-        n = new_node(N_CHAR);
-        n->cp = cp;
-        n->icase = (*flags & RE_ICASE) != 0;
-        return n;
-    }
+    add_kid(cat, lit_node(ps, pat_rune(ps), *flags));
+    return 1;
 }
 
 static Node *parse_cat(Parser *ps, int *flags) {
     Node *cat = new_node(N_CAT);
-    int nrep;
-    while (*ps->p && *ps->p != '|' && *ps->p != ')') {
-        Node *a;
-        int c = (unsigned char)*ps->p;
-        if (c == '*' || c == '+' || c == '?') { set_err(ps, "missing argument to repetition operator"); free_node(cat); return NULL; }
-        a = parse_atom(ps, flags);
-        if (!a) { free_node(cat); return NULL; }
-        /* repetitions (a second, nested one is an error, as in RE2) */
-        for (nrep = 0;; nrep++) {
-            int min, max;
-            const char *save = ps->p;
-            c = (unsigned char)*ps->p;
-            if (c == '*') { min = 0; max = -1; ps->p++; }
-            else if (c == '+') { min = 1; max = -1; ps->p++; }
-            else if (c == '?') { min = 0; max = 1; ps->p++; }
-            else if (c == '{') {
-                ps->p++;
-                if (!parse_int(ps, &min)) { ps->p = save; break; }
-                if (*ps->p == ',') {
-                    ps->p++;
-                    if (!parse_int(ps, &max)) max = -1;
-                } else max = min;
-                if (*ps->p != '}') { ps->p = save; break; }
-                ps->p++;
-                if (min > 1000 || max > 1000 || (max >= 0 && max < min)) {
-                    set_err(ps, "invalid repeat count");
-                    free_node(a); free_node(cat);
-                    return NULL;
-                }
-            } else break;
-            if (nrep > 0) {
-                set_err(ps, "invalid nested repetition operator");
-                free_node(a); free_node(cat);
-                return NULL;
+    int lastrep = 0;
+    for (;;) {
+        int min, max;
+        const char *after;
+        if (!*ps->p || *ps->p == '|' || *ps->p == ')') break;
+        if (repeat_op(ps->p, &min, &max, &after)) {
+            Node *r;
+            if (*ps->p == '{' && (min < 0 || min > MAX_REPEAT || max > MAX_REPEAT || (max >= 0 && min > max))) {
+                set_err(ps, "invalid repeat count");
+                goto fail;
             }
-            {
-                Node *r = new_node(N_REP);
-                r->min = min;
-                r->max = max;
-                r->greedy = 1;
-                if (*ps->p == '?') { r->greedy = 0; ps->p++; }
-                if (*flags & 0x400) r->greedy = !r->greedy;
-                add_kid(r, a);
-                a = r;
+            if (lastrep) { set_err(ps, "invalid nested repetition operator"); goto fail; }
+            if (!cat->nkids) { set_err(ps, "missing argument to repetition operator"); goto fail; }
+            ps->p = after;
+            r = new_node(N_REP);
+            r->min = min;
+            r->max = max;
+            r->greedy = 1;
+            if (*ps->p == '?') { r->greedy = 0; ps->p++; }
+            if (*flags & PF_UNGREEDY) r->greedy = !r->greedy;
+            add_kid(r, cat->kids[cat->nkids - 1]);
+            cat->kids[cat->nkids - 1] = r;
+            if (r->height >= cat->height) cat->height = r->height + 1;
+            /* a*(?i)*(?i)*... nests repetitions without parentheses */
+            if (cat->height > MAX_HEIGHT) { set_err(ps, "expression nests too deeply"); goto fail; }
+            if ((min >= 2 || max >= 2) && !repeat_valid(r, MAX_REPEAT)) {
+                set_err(ps, "invalid repeat count");
+                goto fail;
             }
+            lastrep = 1;
+            continue;
         }
-        /* a '{' that did not form a repeat is parsed as a literal next loop */
-        add_kid(cat, a);
+        lastrep = 0;
+        if (parse_atom(ps, flags, cat) < 0) goto fail;
     }
     return cat;
+fail:
+    free_node(cat);
+    return NULL;
 }
 
 static Node *parse_alt(Parser *ps, int *flags) {
@@ -602,18 +1040,19 @@ static Node *parse_alt(Parser *ps, int *flags) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Code generation                                                     */
+/* Code generation (the structure follows Go's compiler, so that match
+   priorities, including empty-width loops, are the same)               */
 
-static int emit(Regex *re, int op, int x, int y, int flag) {
-    if (re->nprog == re->cprog) {
-        re->cprog = re->cprog ? re->cprog * 2 : 64;
-        re->prog = xrealloc(re->prog, sizeof *re->prog * (size_t)re->cprog);
+static int emit(Prog *p, int op, int x, int y, int flag) {
+    if (p->n == p->cap) {
+        p->cap = p->cap ? p->cap * 2 : 64;
+        p->ins = xrealloc(p->ins, sizeof *p->ins * (size_t)p->cap);
     }
-    re->prog[re->nprog].op = (unsigned char)op;
-    re->prog[re->nprog].x = x;
-    re->prog[re->nprog].y = y;
-    re->prog[re->nprog].flag = (unsigned char)flag;
-    return re->nprog++;
+    p->ins[p->n].op = (unsigned char)op;
+    p->ins[p->n].x = x;
+    p->ins[p->n].y = y;
+    p->ins[p->n].flag = (unsigned char)flag;
+    return p->n++;
 }
 
 /* can the node match the empty string? */
@@ -634,94 +1073,761 @@ static int nullable(const Node *n) {
     return 0;
 }
 
-static int gen(Regex *re, Node *n) {
+static int gen(Prog *p, const Node *n, int rev);
+
+/* set the preferred / other branch of a split */
+static void split_to(Prog *p, int sp, int pref, int other, int greedy) {
+    p->ins[sp].x = greedy ? pref : other;
+    p->ins[sp].y = greedy ? other : pref;
+}
+
+/* x+ : x, then loop back */
+static int gen_plus(Prog *p, const Node *k, int greedy, int rev) {
+    int body = p->n, sp;
+    if (gen(p, k, rev) < 0) return -1;
+    sp = emit(p, I_SPLIT, 0, 0, 0);
+    split_to(p, sp, body, p->n, greedy);
+    return 0;
+}
+
+static int gen(Prog *p, const Node *n, int rev) {
     int i;
-    if (re->nprog > 200000) return -1;
+    if (p->n > MAX_PROG) return -1;
     switch (n->type) {
     case N_EMPTY: break;
-    case N_CHAR: {
-        char buf[4];
-        int k = utf8_encode(n->cp, buf);
-        if (k == 1 && n->icase && isalpha((unsigned char)buf[0]))
-            emit(re, I_CHARI, tolower((unsigned char)buf[0]), 0, 0);
-        else
-            for (i = 0; i < k; i++) emit(re, I_CHAR, (unsigned char)buf[i], 0, 0);
+    case N_CHAR:
+        emit(p, n->icase ? I_CHARI : I_CHAR, n->cp, 0, 0);
         break;
-    }
-    case N_ANY: emit(re, n->cp ? I_ANYNL : I_ANY, 0, 0, 0); break;
-    case N_CLASS: emit(re, I_CLASS, n->cp, 0, 0); break;
-    case N_ASSERT: emit(re, I_ASSERT, n->cp, 0, n->multiline); break;
+    case N_ANY: emit(p, n->cp ? I_ANYNL : I_ANY, 0, 0, 0); break;
+    case N_CLASS: emit(p, I_CLASS, n->cp, 0, 0); break;
+    case N_ASSERT: emit(p, I_ASSERT, n->cp, 0, n->ml); break;
     case N_CAT:
         for (i = 0; i < n->nkids; i++)
-            if (gen(re, n->kids[i]) < 0) return -1;
+            if (gen(p, n->kids[rev ? n->nkids - 1 - i : i], rev) < 0) return -1;
         break;
     case N_ALT: {
         int *jmps = xmalloc(sizeof(int) * (size_t)n->nkids);
         for (i = 0; i < n->nkids; i++) {
             if (i < n->nkids - 1) {
-                int sp = emit(re, I_SPLIT, 0, 0, 0);
-                re->prog[sp].x = re->nprog;
-                if (gen(re, n->kids[i]) < 0) { free(jmps); return -1; }
-                jmps[i] = emit(re, I_JMP, 0, 0, 0);
-                re->prog[sp].y = re->nprog;
-            } else {
-                if (gen(re, n->kids[i]) < 0) { free(jmps); return -1; }
+                int sp = emit(p, I_SPLIT, 0, 0, 0);
+                p->ins[sp].x = p->n;
+                if (gen(p, n->kids[i], rev) < 0) { free(jmps); return -1; }
+                jmps[i] = emit(p, I_JMP, 0, 0, 0);
+                p->ins[sp].y = p->n;
+            } else if (gen(p, n->kids[i], rev) < 0) {
+                free(jmps);
+                return -1;
             }
         }
-        for (i = 0; i < n->nkids - 1; i++) re->prog[jmps[i]].x = re->nprog;
+        for (i = 0; i < n->nkids - 1; i++) p->ins[jmps[i]].x = p->n;
         free(jmps);
         break;
     }
     case N_GROUP:
-        if (n->cap >= 0) emit(re, I_SAVE, 2 * n->cap, 0, 0);
-        if (gen(re, n->kids[0]) < 0) return -1;
-        if (n->cap >= 0) emit(re, I_SAVE, 2 * n->cap + 1, 0, 0);
+        if (n->cap >= 0 && !rev) emit(p, I_SAVE, 2 * n->cap, 0, 0);
+        if (gen(p, n->kids[0], rev) < 0) return -1;
+        if (n->cap >= 0 && !rev) emit(p, I_SAVE, 2 * n->cap + 1, 0, 0);
         break;
     case N_REP: {
-        Node *k = n->kids[0];
-        for (i = 0; i < n->min; i++)
-            if (gen(re, k) < 0) return -1;
-        if (n->max == -1 && nullable(k)) {
-            /* like Go: x* with a nullable body compiles as (x+)? so that an
-               empty iteration cannot hide the exit path from the memo table */
-            int sp = emit(re, I_SPLIT, 0, 0, 0), sp2;
-            int body = re->nprog;
-            if (gen(re, k) < 0) return -1;
-            sp2 = emit(re, I_SPLIT, 0, 0, 0);
-            if (n->greedy) {
-                re->prog[sp].x = body; re->prog[sp].y = re->nprog;
-                re->prog[sp2].x = body; re->prog[sp2].y = re->nprog;
+        const Node *k = n->kids[0];
+        if (n->max == -1) {
+            if (n->min == 0) {
+                int sp = emit(p, I_SPLIT, 0, 0, 0), body = p->n;
+                if (nullable(k)) {
+                    /* x* with a nullable x is (x+)? as in Go */
+                    if (gen_plus(p, k, n->greedy, rev) < 0) return -1;
+                } else {
+                    if (gen(p, k, rev) < 0) return -1;
+                    emit(p, I_JMP, sp, 0, 0);
+                }
+                split_to(p, sp, body, p->n, n->greedy);
             } else {
-                re->prog[sp].x = re->nprog; re->prog[sp].y = body;
-                re->prog[sp2].x = re->nprog; re->prog[sp2].y = body;
+                /* x{n,} is n-1 copies of x, then x+ */
+                for (i = 0; i < n->min - 1; i++)
+                    if (gen(p, k, rev) < 0) return -1;
+                if (gen_plus(p, k, n->greedy, rev) < 0) return -1;
             }
-        } else if (n->max == -1) {
-            int sp = emit(re, I_SPLIT, 0, 0, 0), j;
-            int body = re->nprog;
-            if (gen(re, k) < 0) return -1;
-            j = emit(re, I_JMP, sp, 0, 0);
-            (void)j;
-            if (n->greedy) { re->prog[sp].x = body; re->prog[sp].y = re->nprog; }
-            else { re->prog[sp].x = re->nprog; re->prog[sp].y = body; }
-        } else if (n->max > n->min) {
-            int cnt = n->max - n->min;
-            int *sps = xmalloc(sizeof(int) * (size_t)cnt);
+        } else {
+            /* x{n,m}: n copies of x, then (x(x(x)?)?)? */
+            int cnt = n->max - n->min, *sps;
+            for (i = 0; i < n->min; i++)
+                if (gen(p, k, rev) < 0) return -1;
+            if (cnt <= 0) break;
+            sps = xmalloc(sizeof(int) * (size_t)cnt);
             for (i = 0; i < cnt; i++) {
-                sps[i] = emit(re, I_SPLIT, 0, 0, 0);
-                if (n->greedy) re->prog[sps[i]].x = re->nprog;
-                else re->prog[sps[i]].y = re->nprog;
-                if (gen(re, k) < 0) { free(sps); return -1; }
+                sps[i] = emit(p, I_SPLIT, p->n + 1, 0, 0);
+                if (gen(p, k, rev) < 0) { free(sps); return -1; }
             }
-            for (i = 0; i < cnt; i++) {
-                if (n->greedy) re->prog[sps[i]].y = re->nprog;
-                else re->prog[sps[i]].x = re->nprog;
-            }
+            for (i = 0; i < cnt; i++) split_to(p, sps[i], sps[i] + 1, p->n, n->greedy);
             free(sps);
         }
         break;
     }
     }
+    return p->n > MAX_PROG ? -1 : 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Context flags for empty-width assertions at a position              */
+
+#define F_BOT 1   /* at offset 0 */
+#define F_PNL 2   /* previous byte is \n */
+#define F_PW  4   /* previous byte is a word character */
+#define F_EOT 8   /* at the end */
+#define F_NNL 16  /* next byte is \n */
+#define F_NW  32  /* next byte is a word character */
+
+static int assert_ok(int kind, int ml, unsigned f) {
+    switch (kind) {
+    case A_BOL: return (f & F_BOT) || (ml && (f & F_PNL));
+    case A_EOL: return (f & F_EOT) || (ml && (f & F_NNL));
+    case A_BOT: return (f & F_BOT) != 0;
+    case A_EOT: return (f & F_EOT) != 0;
+    case A_WORDB: return !(f & F_PW) != !(f & F_NW);
+    case A_NWORDB: return !(f & F_PW) == !(f & F_NW);
+    }
     return 0;
+}
+
+static unsigned prev_flags(const unsigned char *s, int pos) {
+    if (pos == 0) return F_BOT;
+    return (s[pos - 1] == '\n' ? F_PNL : 0) | (word_tab[s[pos - 1]] ? F_PW : 0);
+}
+
+static unsigned next_flags(const unsigned char *s, int len, int pos) {
+    if (pos >= len) return F_EOT;
+    return (s[pos] == '\n' ? F_NNL : 0) | (word_tab[s[pos]] ? F_NW : 0);
+}
+
+static int inst_match(const Regex *re, const Inst *in, int cp) {
+    switch (in->op) {
+    case I_CHAR: return cp == in->x;
+    case I_CHARI: return cp == in->x || cp == in->x - 32;
+    case I_ANY: return cp != '\n';
+    case I_ANYNL: return 1;
+    case I_CLASS: return class_has(&re->classes[in->x], cp);
+    }
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Lazy DFA                                                            */
+
+typedef struct {
+    int k, nk;              /* kernel: offset in kpool, length */
+    int chain;              /* next state in the hash bucket */
+    unsigned hash;
+    unsigned char flags;    /* context flags known on entry */
+    unsigned char inject;   /* 0: none, 1: start thread here only, 2: at every position */
+} DState;
+
+struct DFA {
+    const Regex *re;
+    const Inst *prog;
+    int nprog;
+    int longest;            /* longest match (reverse) vs leftmost-first */
+    int reverse;
+    unsigned fmask;         /* context flags the program looks at */
+    unsigned char bclass[128];
+    int brep[129];          /* representative byte of each class */
+    int nbc, stride;        /* byte classes; row width (+1: end of text) */
+    DState *st;
+    int nst, cst;
+    int *trans;             /* nst * stride: -1 unknown, else next<<2|idle<<1|matched */
+    int *kpool;
+    size_t nkp, ckp;
+    int *htab;
+    int hsize;
+    int start[3][64];       /* state for (inject, flags), -1 unknown */
+    struct { int st, cp, val; } uc[256]; /* transitions on non-ASCII */
+    int *stk, *list, *nlist;
+    unsigned *mark;
+    unsigned gen;
+    size_t mem, budget;
+    int resets;
+};
+
+static unsigned dfa_hash(const int *k, int nk, unsigned flags, unsigned inject) {
+    unsigned h = 2166136261u ^ flags ^ (inject << 8);
+    int i;
+    for (i = 0; i < nk; i++) h = (h ^ (unsigned)k[i]) * 16777619u;
+    return h;
+}
+
+static void dfa_reset(DFA *d) {
+    int i;
+    d->nst = 1; /* keep the dead state */
+    d->nkp = 0;
+    for (i = 0; i < d->hsize; i++) d->htab[i] = -1;
+    memset(d->start, -1, sizeof d->start);
+    for (i = 0; i < 256; i++) d->uc[i].st = -1;
+    d->mem = 0;
+    d->resets++;
+}
+
+static DFA *dfa_new(const Regex *re, const Prog *p, int longest, int reverse) {
+    DFA *d = xcalloc(1, sizeof *d);
+    unsigned char brk[129];
+    int i, b, n;
+    d->re = re;
+    d->prog = p->ins;
+    d->nprog = p->n;
+    d->longest = longest;
+    d->reverse = reverse;
+    for (i = 0; i < p->n; i++) {
+        const Inst *in = &p->ins[i];
+        if (in->op != I_ASSERT) continue;
+        switch (in->x) {
+        case A_BOL: d->fmask |= F_BOT | (in->flag ? F_PNL : 0); break;
+        case A_EOL: d->fmask |= F_EOT | (in->flag ? F_NNL : 0); break;
+        case A_BOT: d->fmask |= F_BOT; break;
+        case A_EOT: d->fmask |= F_EOT; break;
+        default: d->fmask |= F_PW | F_NW; break;
+        }
+    }
+    /* byte classes: ASCII bytes no instruction or flag can tell apart */
+    memset(brk, 0, sizeof brk);
+    brk[0] = 1;
+    for (i = 0; i < p->n; i++) {
+        const Inst *in = &p->ins[i];
+        switch (in->op) {
+        case I_CHAR:
+            if (in->x < 128) { brk[in->x] = 1; brk[in->x + 1] = 1; }
+            break;
+        case I_CHARI:
+            brk[in->x] = brk[in->x + 1] = 1;
+            brk[in->x - 32] = brk[in->x - 31] = 1;
+            break;
+        case I_ANY:
+            brk['\n'] = brk['\n' + 1] = 1;
+            break;
+        case I_CLASS: {
+            const Class *c = &re->classes[in->x];
+            for (b = 1; b < 128; b++)
+                if (class_has(c, b) != class_has(c, b - 1)) brk[b] = 1;
+            break;
+        }
+        }
+    }
+    if (d->fmask & (F_PNL | F_NNL)) brk['\n'] = brk['\n' + 1] = 1;
+    if (d->fmask & (F_PW | F_NW))
+        for (b = 1; b < 128; b++)
+            if (is_word(b) != is_word(b - 1)) brk[b] = 1;
+    for (b = 0, n = -1; b < 128; b++) {
+        if (brk[b]) d->brep[++n] = b;
+        d->bclass[b] = (unsigned char)n;
+    }
+    d->nbc = n + 1;
+    d->stride = d->nbc + 1;
+    d->stk = xmalloc(sizeof(int) * (2 * (size_t)p->n + 2));
+    d->list = xmalloc(sizeof(int) * (size_t)p->n);
+    d->nlist = xmalloc(sizeof(int) * (size_t)p->n);
+    d->mark = xcalloc((size_t)p->n, sizeof(unsigned));
+    d->budget = DFA_BUDGET;
+    /* room for a few states even with every instruction in the kernel */
+    if (d->budget / 4 < (size_t)p->n * sizeof(int)) d->budget = (size_t)p->n * sizeof(int) * 4;
+    d->hsize = 64;
+    d->htab = xmalloc(sizeof(int) * (size_t)d->hsize);
+    d->ckp = 64;
+    d->kpool = xmalloc(sizeof(int) * d->ckp);
+    dfa_reset(d);
+    d->resets = 0;
+    /* the dead state: no threads, all transitions to itself */
+    d->cst = 16;
+    d->st = xcalloc((size_t)d->cst, sizeof *d->st);
+    d->trans = xcalloc((size_t)d->cst * (size_t)d->stride, sizeof(int));
+    d->nst = 1;
+    return d;
+}
+
+static void dfa_free(DFA *d) {
+    if (!d) return;
+    free(d->st);
+    free(d->trans);
+    free(d->kpool);
+    free(d->htab);
+    free(d->stk);
+    free(d->list);
+    free(d->nlist);
+    free(d->mark);
+    free(d);
+}
+
+static unsigned dfa_newgen(DFA *d) {
+    if (++d->gen == 0) {
+        memset(d->mark, 0, sizeof(unsigned) * (size_t)d->nprog);
+        d->gen = 1;
+    }
+    return d->gen;
+}
+
+/* the state for kernel k, or a new one */
+static int dfa_state(DFA *d, const int *k, int nk, unsigned flags, unsigned inject) {
+    unsigned h;
+    int i, idx;
+    size_t need;
+    if (nk == 0 && inject == 0) return 0;
+    flags &= d->fmask;
+    h = dfa_hash(k, nk, flags, inject);
+    for (i = d->htab[h & (unsigned)(d->hsize - 1)]; i >= 0; i = d->st[i].chain) {
+        const DState *s = &d->st[i];
+        if (s->hash == h && s->nk == nk && s->flags == flags && s->inject == inject &&
+            (nk == 0 || !memcmp(d->kpool + s->k, k, sizeof(int) * (size_t)nk)))
+            return i;
+    }
+    need = sizeof(DState) + sizeof(int) * ((size_t)nk + (size_t)d->stride + 1);
+    if (d->mem + need > d->budget && d->nst > 1) dfa_reset(d);
+    d->mem += need;
+    if (d->nst == d->cst) {
+        d->cst *= 2;
+        d->st = xrealloc(d->st, sizeof *d->st * (size_t)d->cst);
+        d->trans = xrealloc(d->trans, sizeof(int) * (size_t)d->cst * (size_t)d->stride);
+    }
+    if (d->nkp + (size_t)nk > d->ckp) {
+        d->ckp = (d->nkp + (size_t)nk) * 2 + 64;
+        d->kpool = xrealloc(d->kpool, sizeof(int) * d->ckp);
+    }
+    if (d->nst >= d->hsize) {
+        int j;
+        d->hsize *= 2;
+        d->htab = xrealloc(d->htab, sizeof(int) * (size_t)d->hsize);
+        for (j = 0; j < d->hsize; j++) d->htab[j] = -1;
+        for (j = 1; j < d->nst; j++) {
+            unsigned b = d->st[j].hash & (unsigned)(d->hsize - 1);
+            d->st[j].chain = d->htab[b];
+            d->htab[b] = j;
+        }
+    }
+    idx = d->nst++;
+    if (nk) memcpy(d->kpool + d->nkp, k, sizeof(int) * (size_t)nk);
+    d->st[idx].k = (int)d->nkp;
+    d->st[idx].nk = nk;
+    d->st[idx].hash = h;
+    d->st[idx].flags = (unsigned char)flags;
+    d->st[idx].inject = (unsigned char)inject;
+    d->nkp += (size_t)nk;
+    d->st[idx].chain = d->htab[h & (unsigned)(d->hsize - 1)];
+    d->htab[h & (unsigned)(d->hsize - 1)] = idx;
+    for (i = 0; i < d->stride; i++) d->trans[(size_t)idx * (size_t)d->stride + (size_t)i] = -1;
+    return idx;
+}
+
+/* Follow empty transitions from the kernel (and the start, if injecting)
+ * under context flags f, collecting the character-consuming instructions
+ * in priority order into d->list.  Returns whether MATCH was reached; in
+ * leftmost-first mode everything of lower priority is then cut off. */
+static int dfa_closure(DFA *d, const int *k, int nk, int inject, unsigned f, int *nout) {
+    unsigned g = dfa_newgen(d);
+    int i, nl = 0, matched = 0;
+    for (i = 0; i <= nk; i++) {
+        int sp = 0;
+        if (i < nk) d->stk[sp++] = k[i];
+        else if (inject) d->stk[sp++] = 0;
+        while (sp > 0) {
+            int pc = d->stk[--sp];
+            const Inst *in = &d->prog[pc];
+            if (d->mark[pc] == g) continue;
+            d->mark[pc] = g;
+            switch (in->op) {
+            case I_SPLIT: d->stk[sp++] = in->y; d->stk[sp++] = in->x; break;
+            case I_JMP: d->stk[sp++] = in->x; break;
+            case I_SAVE: d->stk[sp++] = pc + 1; break;
+            case I_ASSERT: if (assert_ok(in->x, in->flag, f)) d->stk[sp++] = pc + 1; break;
+            case I_MATCH:
+                matched = 1;
+                if (!d->longest) { *nout = nl; return 1; }
+                break;
+            default: d->list[nl++] = pc; break;
+            }
+        }
+    }
+    *nout = nl;
+    return matched;
+}
+
+static int int_cmp(const void *a, const void *b) {
+    int x = *(const int *)a, y = *(const int *)b;
+    return x < y ? -1 : x > y;
+}
+
+/* Compute the transition of state s on code point cp (cp < 0: the end of
+ * the text).  col >= 0 caches it in that column. */
+static int dfa_compute(DFA *d, int s, int col, int cp) {
+    DState st = d->st[s];
+    unsigned f, nf = 0;
+    int i, nl, nn = 0, matched, nx, resets = d->resets, val;
+    unsigned g;
+    if (cp < 0) {
+        f = d->reverse ? F_BOT : F_EOT;
+    } else {
+        int w = cp < 128 && is_word(cp), nlc = cp == '\n';
+        f = d->reverse ? (unsigned)((w ? F_PW : 0) | (nlc ? F_PNL : 0))
+                       : (unsigned)((w ? F_NW : 0) | (nlc ? F_NNL : 0));
+        nf = d->reverse ? (unsigned)((w ? F_NW : 0) | (nlc ? F_NNL : 0))
+                        : (unsigned)((w ? F_PW : 0) | (nlc ? F_PNL : 0));
+    }
+    matched = dfa_closure(d, d->kpool + st.k, st.nk, st.inject, f | st.flags, &nl);
+    if (cp < 0) {
+        val = matched;
+    } else {
+        g = dfa_newgen(d);
+        for (i = 0; i < nl; i++) {
+            int pc = d->list[i];
+            if (inst_match(d->re, &d->prog[pc], cp) && d->mark[pc + 1] != g) {
+                d->mark[pc + 1] = g;
+                d->nlist[nn++] = pc + 1;
+            }
+        }
+        if (d->longest && nn > 1) qsort(d->nlist, (size_t)nn, sizeof(int), int_cmp);
+        nx = dfa_state(d, d->nlist, nn, nf, st.inject == 2 && !matched ? 2 : 0);
+        val = (nx << 2) | (nx && d->st[nx].nk == 0 && d->st[nx].inject == 2 ? 2 : 0) | matched;
+    }
+    if (col >= 0 && d->resets == resets) d->trans[(size_t)s * (size_t)d->stride + (size_t)col] = val;
+    return val;
+}
+
+static int dfa_step(DFA *d, int s, int cp) {
+    if (cp < 128) {
+        int col = d->bclass[cp], t = d->trans[(size_t)s * (size_t)d->stride + (size_t)col];
+        return t >= 0 ? t : dfa_compute(d, s, col, d->brep[col]);
+    } else {
+        unsigned h = ((unsigned)s * 2654435761u ^ (unsigned)cp) & 255;
+        int resets = d->resets, val;
+        if (d->uc[h].st == s && d->uc[h].cp == cp) return d->uc[h].val;
+        val = dfa_compute(d, s, -1, cp);
+        if (d->resets == resets) {
+            d->uc[h].st = s;
+            d->uc[h].cp = cp;
+            d->uc[h].val = val;
+        }
+        return val;
+    }
+}
+
+static int dfa_edge(DFA *d, int s) {
+    int t = d->trans[(size_t)s * (size_t)d->stride + (size_t)d->nbc];
+    return t >= 0 ? t : dfa_compute(d, s, d->nbc, -1);
+}
+
+static int dfa_start(DFA *d, unsigned flags, int inject) {
+    int *c;
+    flags &= d->fmask;
+    c = &d->start[inject][flags];
+    if (*c < 0) *c = dfa_state(d, NULL, 0, flags, (unsigned)inject);
+    return *c;
+}
+
+/* next offset >= pos where a match could start, or -1 */
+static int prefilter(const Regex *re, const unsigned char *s, int len, int pos) {
+    if (re->pf == 1) {
+        const unsigned char *q = memchr(s + pos, re->pfbyte, (size_t)(len - pos));
+        return q ? (int)(q - s) : -1;
+    }
+    for (;;) {
+        const unsigned char *t = re->pftab;
+        while (len - pos >= 4) {
+            if (t[s[pos]]) goto found;
+            if (t[s[++pos]]) goto found;
+            if (t[s[++pos]]) goto found;
+            if (t[s[++pos]]) goto found;
+            pos++;
+        }
+        for (; pos < len; pos++)
+            if (t[s[pos]]) goto found;
+        return -1;
+    found:
+        if (!re->wordstart || pos == 0 || !word_tab[s[pos]] || !word_tab[s[pos - 1]]) return pos;
+        while (pos < len && word_tab[s[pos]]) pos++; /* skip the rest of the word */
+    }
+}
+
+/* Pass 1: end of the leftmost-first match starting at or after start. */
+static int dfa_forward(const Regex *re, DFA *d, const unsigned char *s, int len, int start) {
+    int pos = start, last = -1, st, t, idlebrk = re->pf ? 2 : 0;
+    st = dfa_start(d, prev_flags(s, start), re->anchored ? 1 : 2);
+    t = d->st[st].nk == 0 && d->st[st].inject == 2 ? 2 : 0;
+    for (;;) {
+        if (t & idlebrk) {
+            int p = prefilter(re, s, len, pos);
+            if (p < 0) break;
+            if (p != pos) {
+                pos = p;
+                st = dfa_start(d, prev_flags(s, pos), 2);
+            }
+        }
+        if (pos >= len) {
+            if (dfa_edge(d, st) & 1) last = len;
+            break;
+        }
+        if (s[pos] < 0x80) {
+            /* hot loop over ASCII with cached transitions */
+            const int *tr = d->trans;
+            const unsigned char *bc = d->bclass;
+            int stride = d->stride;
+            for (;;) {
+                t = tr[(size_t)st * (size_t)stride + bc[s[pos]]];
+                if (t < 0) t = dfa_compute(d, st, bc[s[pos]], d->brep[bc[s[pos]]]);
+                if (t & 1) last = pos;
+                st = t >> 2;
+                pos++;
+                if (!st || (t & idlebrk) || pos >= len || s[pos] >= 0x80) break;
+                tr = d->trans;
+            }
+            if (!st) break;
+        } else {
+            int cp, w = dec(s + pos, len - pos, &cp);
+            t = dfa_step(d, st, cp);
+            if (t & 1) last = pos;
+            st = t >> 2;
+            if (!st) break;
+            pos += w;
+        }
+    }
+    return last;
+}
+
+/* Pass 2: start of the longest match of the reverse program that ends at
+   e and starts at or after start (that is, the leftmost-first match). */
+static int dfa_backward(DFA *d, const unsigned char *s, int len, int start, int e) {
+    int pos = e, last = -1, st, t;
+    st = dfa_start(d, next_flags(s, len, e), 1);
+    for (;;) {
+        int cp, w;
+        if (pos == 0) {
+            if (dfa_edge(d, st) & 1) last = 0;
+            break;
+        }
+        if (s[pos - 1] < 0x80 && pos > start) {
+            /* hot loop over ASCII with cached transitions */
+            const unsigned char *bc = d->bclass;
+            int stride = d->stride;
+            do {
+                t = d->trans[(size_t)st * (size_t)stride + bc[s[pos - 1]]];
+                if (t < 0) t = dfa_compute(d, st, bc[s[pos - 1]], d->brep[bc[s[pos - 1]]]);
+                if (t & 1) last = pos;
+                st = t >> 2;
+                pos--;
+            } while (st && pos > start && s[pos - 1] < 0x80);
+            if (!st) break;
+            continue;
+        }
+        w = dec_last(s, pos == start ? 0 : start, pos, &cp);
+        t = dfa_step(d, st, cp);
+        if (t & 1) last = pos;
+        if (pos == start) break;
+        st = t >> 2;
+        if (!st) break;
+        pos -= w;
+    }
+    return last;
+}
+
+/* ------------------------------------------------------------------ */
+/* Pike VM: submatches of the leftmost-first match that is known to span
+   [L, e).  Threads are kept in priority order; memory O(prog * ncap). */
+
+typedef struct {
+    int *pc, *caps, n;
+} Threads;
+
+typedef struct {
+    int pc, slot, val; /* slot >= 0: restore caps[slot] = val */
+} PikeJob;
+
+#define PUSH_PC(v) (stk[sp].pc = (v), stk[sp].slot = -1, stk[sp].val = 0, sp++)
+
+static void pike_add(const Regex *re, Threads *t, unsigned *mark, unsigned g, PikeJob *stk, int pc0,
+                     int *cur, int nslot, unsigned f, int pos) {
+    int sp = 0;
+    PUSH_PC(pc0);
+    while (sp > 0) {
+        PikeJob j = stk[--sp];
+        const Inst *in;
+        if (j.slot >= 0) { cur[j.slot] = j.val; continue; }
+        if (mark[j.pc] == g) continue;
+        mark[j.pc] = g;
+        in = &re->fwd.ins[j.pc];
+        switch (in->op) {
+        case I_SPLIT: PUSH_PC(in->y); PUSH_PC(in->x); break;
+        case I_JMP: PUSH_PC(in->x); break;
+        case I_SAVE:
+            if (in->x < nslot) {
+                stk[sp].pc = 0;
+                stk[sp].slot = in->x;
+                stk[sp++].val = cur[in->x];
+                cur[in->x] = pos;
+            }
+            PUSH_PC(j.pc + 1);
+            break;
+        case I_ASSERT:
+            if (assert_ok(in->x, in->flag, f)) PUSH_PC(j.pc + 1);
+            break;
+        default:
+            t->pc[t->n] = j.pc;
+            memcpy(t->caps + (size_t)t->n * (size_t)nslot, cur, sizeof(int) * (size_t)nslot);
+            t->n++;
+            break;
+        }
+    }
+}
+#undef PUSH_PC
+
+/* returns 0 if it would need too much memory */
+static int pike(const Regex *re, const unsigned char *s, int len, int L, int e, int *caps, int nslot) {
+    size_t n = (size_t)re->fwd.n;
+    Threads a, b, *cl = &a, *nl = &b;
+    unsigned *mark, g = 0;
+    PikeJob *stk;
+    int *cur, pos = L, i, found = 0;
+    if ((size_t)nslot > PIKE_BUDGET / (2 * sizeof(int)) / n) return 0; /* no overflow */
+    a.pc = xmalloc(sizeof(int) * n);
+    b.pc = xmalloc(sizeof(int) * n);
+    a.caps = xmalloc(sizeof(int) * n * (size_t)nslot);
+    b.caps = xmalloc(sizeof(int) * n * (size_t)nslot);
+    a.n = b.n = 0;
+    mark = xcalloc(n, sizeof(unsigned));
+    stk = xmalloc(sizeof *stk * (2 * n + 2));
+    cur = xmalloc(sizeof(int) * (size_t)nslot);
+    for (i = 0; i < nslot; i++) cur[i] = -1;
+    pike_add(re, cl, mark, ++g, stk, 0, cur, nslot, prev_flags(s, pos) | next_flags(s, len, pos), pos);
+    while (cl->n > 0) {
+        int cp = -1, w = 0;
+        Threads *tmp;
+        if (pos < e) w = dec(s + pos, len - pos, &cp);
+        nl->n = 0;
+        g++;
+        for (i = 0; i < cl->n; i++) {
+            const Inst *in = &re->fwd.ins[cl->pc[i]];
+            int *tc = cl->caps + (size_t)i * (size_t)nslot;
+            if (in->op == I_MATCH) {
+                if (pos == e) {
+                    memcpy(caps, tc, sizeof(int) * (size_t)nslot);
+                    found = 1;
+                    break;
+                }
+                continue;
+            }
+            if (pos < e && inst_match(re, in, cp)) {
+                memcpy(cur, tc, sizeof(int) * (size_t)nslot);
+                pike_add(re, nl, mark, g, stk, cl->pc[i] + 1, cur, nslot,
+                         prev_flags(s, pos + w) | next_flags(s, len, pos + w), pos + w);
+            }
+        }
+        if (found || pos >= e) break;
+        pos += w;
+        tmp = cl; cl = nl; nl = tmp;
+    }
+    free(a.pc); free(b.pc); free(a.caps); free(b.caps);
+    free(mark); free(stk); free(cur);
+    return found;
+}
+
+/* ------------------------------------------------------------------ */
+/* Compilation                                                         */
+
+/* Walk the forward program from the start through empty-width
+ * instructions.  mode 0: assertions that need offset 0 fail, others pass;
+ * mode 1: all pass; mode 2: evaluated under context flags f.  Returns
+ * whether MATCH is reachable; collects the consumers into out. */
+static int start_closure(const Regex *re, int mode, unsigned f, int *out, int *nout) {
+    const Prog *p = &re->fwd;
+    unsigned char *seen = xcalloc((size_t)p->n, 1);
+    int *stk = xmalloc(sizeof(int) * (2 * (size_t)p->n + 2)), sp = 0, n = 0, matched = 0;
+    stk[sp++] = 0;
+    while (sp > 0) {
+        int pc = stk[--sp];
+        const Inst *in = &p->ins[pc];
+        if (seen[pc]) continue;
+        seen[pc] = 1;
+        switch (in->op) {
+        case I_SPLIT: stk[sp++] = in->y; stk[sp++] = in->x; break;
+        case I_JMP: stk[sp++] = in->x; break;
+        case I_SAVE: stk[sp++] = pc + 1; break;
+        case I_ASSERT:
+            if (mode == 2 ? assert_ok(in->x, in->flag, f)
+                          : mode == 1 || !(in->x == A_BOT || (in->x == A_BOL && !in->flag)))
+                stk[sp++] = pc + 1;
+            break;
+        case I_MATCH: matched = 1; break;
+        default: out[n++] = pc; break;
+        }
+    }
+    free(seen);
+    free(stk);
+    *nout = n;
+    return matched;
+}
+
+static void analyze(Regex *re) {
+    const Prog *p = &re->fwd;
+    int *cons = xmalloc(sizeof(int) * (size_t)p->n), n, i, b, cnt = 0;
+    unsigned char set[32];
+    /* context-free: no ^, \A, \b, \B */
+    re->ctxfree = 1;
+    for (i = 0; i < p->n; i++)
+        if (p->ins[i].op == I_ASSERT && p->ins[i].x != A_EOL && p->ins[i].x != A_EOT) re->ctxfree = 0;
+    /* anchored: without offset 0, nothing can match */
+    re->anchored = !start_closure(re, 0, 0, cons, &n) && n == 0;
+    /* only at word starts: nothing can start between two word characters */
+    re->wordstart = !start_closure(re, 2, F_PW | F_NW, cons, &n) && n == 0;
+    /* literal: SAVE 0, CHAR..., SAVE 1, MATCH */
+    if (re->ncap == 1 && p->n >= 4) {
+        for (i = 1; i < p->n - 2 && p->ins[i].op == I_CHAR && p->ins[i].x != 0xFFFD; i++)
+            ;
+        if (i == p->n - 2 && i > 1) {
+            re->lit = xmalloc((size_t)(p->n - 3) * 4);
+            for (i = 1; i < p->n - 2; i++) re->nlit += enc(p->ins[i].x, re->lit + re->nlit);
+            if (re->nlit > LIT_SHORT) {
+                int k = 0;
+                re->kmp = xmalloc(sizeof(int) * (size_t)re->nlit);
+                re->kmp[0] = 0;
+                for (i = 1; i < re->nlit; i++) {
+                    while (k > 0 && re->lit[i] != re->lit[k]) k = re->kmp[k - 1];
+                    if (re->lit[i] == re->lit[k]) k++;
+                    re->kmp[i] = k;
+                }
+            }
+        }
+    }
+    /* bytes a match can start with */
+    if (!start_closure(re, 1, 0, cons, &n)) {
+        memset(set, 0, sizeof set);
+        for (i = 0; i < n; i++) {
+            const Inst *in = &p->ins[cons[i]];
+            switch (in->op) {
+            case I_CHAR:
+                if (in->x == 0xFFFD) {
+                    for (b = 0x80; b < 256; b++) set[b >> 3] |= (unsigned char)(1u << (b & 7));
+                } else {
+                    unsigned char u[4];
+                    enc(in->x, u);
+                    set[u[0] >> 3] |= (unsigned char)(1u << (u[0] & 7));
+                }
+                break;
+            case I_CHARI:
+                set[in->x >> 3] |= (unsigned char)(1u << (in->x & 7));
+                set[(in->x - 32) >> 3] |= (unsigned char)(1u << ((in->x - 32) & 7));
+                break;
+            case I_CLASS: {
+                const Class *c = &re->classes[in->x];
+                for (b = 0; b < 128; b++)
+                    if (class_has(c, b)) set[b >> 3] |= (unsigned char)(1u << (b & 7));
+                if (c->n && c->r[c->n - 1].hi >= 128)
+                    for (b = 0x80; b < 256; b++) set[b >> 3] |= (unsigned char)(1u << (b & 7));
+                break;
+            }
+            default: /* . */
+                memset(set, 0xFF, sizeof set);
+                break;
+            }
+        }
+        for (b = 0; b < 256; b++)
+            if (set[b >> 3] & (1u << (b & 7))) { cnt++; re->pfbyte = b; }
+        if (cnt == 1) re->pf = 1;
+        else if (cnt < 256) re->pf = 2;
+        for (b = 0; b < 256; b++) re->pftab[b] = (set[b >> 3] >> (b & 7)) & 1;
+    }
+    free(cons);
 }
 
 Regex *re_compile(const char *pattern, int flags, char **err) {
@@ -735,16 +1841,8 @@ Regex *re_compile(const char *pattern, int flags, char **err) {
     ps.ncap = 1;
     if (err) *err = NULL;
     if (flags & RE_LITERAL) {
-        const char *p = pattern;
         root = new_node(N_CAT);
-        while (*p) {
-            int cp, k = utf8_decode(p, (int)strlen(p), &cp);
-            Node *ch = new_node(N_CHAR);
-            ch->cp = cp;
-            ch->icase = (flags & RE_ICASE) != 0;
-            add_kid(root, ch);
-            p += k;
-        }
+        while (*ps.p) add_kid(root, lit_node(&ps, pat_rune(&ps), f));
     } else {
         root = parse_alt(&ps, &f);
         if (root && *ps.p == ')') { set_err(&ps, "unexpected )"); free_node(root); root = NULL; }
@@ -756,23 +1854,18 @@ Regex *re_compile(const char *pattern, int flags, char **err) {
         return NULL;
     }
     re->ncap = ps.ncap;
-    emit(re, I_SAVE, 0, 0, 0);
-    if (gen(re, root) < 0) {
+    emit(&re->fwd, I_SAVE, 0, 0, 0);
+    if (gen(&re->fwd, root, 0) < 0 || gen(&re->rev, root, 1) < 0) {
         free_node(root);
         if (err) *err = xstrdup("regex too large");
         re_free(re);
         return NULL;
     }
-    emit(re, I_SAVE, 1, 0, 0);
-    emit(re, I_MATCH, 0, 0, 0);
+    emit(&re->fwd, I_SAVE, 1, 0, 0);
+    emit(&re->fwd, I_MATCH, 0, 0, 0);
+    emit(&re->rev, I_MATCH, 0, 0, 0);
     free_node(root);
-    /* anchoring / first byte analysis */
-    re->firstbyte = -1;
-    if (re->nprog > 1) {
-        Inst *i1 = &re->prog[1];
-        if (i1->op == I_ASSERT && (i1->x == A_BOT || (i1->x == A_BOL && !i1->flag))) re->anchored = 1;
-        if (i1->op == I_CHAR) re->firstbyte = i1->x;
-    }
+    analyze(re);
     return re;
 }
 
@@ -781,214 +1874,83 @@ void re_free(Regex *re) {
     if (!re) return;
     for (i = 0; i < re->nclass; i++) free(re->classes[i].r);
     free(re->classes);
-    free(re->prog);
+    free(re->fwd.ins);
+    free(re->rev.ins);
+    free(re->lit);
+    free(re->kmp);
+    dfa_free(re->dfa[0]);
+    dfa_free(re->dfa[1]);
     free(re);
 }
 
 int re_ncaps(const Regex *re) { return re->ncap; }
 
-int re_context_free(const Regex *re) {
-    int i;
-    for (i = 0; i < re->nprog; i++) {
-        const Inst *in = &re->prog[i];
-        if (in->op == I_ASSERT && in->x != A_EOL && in->x != A_EOT) return 0;
-    }
-    return 1;
-}
+int re_context_free(const Regex *re) { return re->ctxfree; }
 
 /* ------------------------------------------------------------------ */
-/* Matching                                                            */
+/* Searching                                                           */
 
-static int ascii_word(int c) { return isalnum(c) || c == '_'; }
-
-static int class_match(const Class *c, int cp) {
-    int i, hit = 0;
-    for (i = 0; i < c->n; i++)
-        if (cp >= c->r[i].lo && cp <= c->r[i].hi) { hit = 1; break; }
-    if (!hit && c->icase && cp < 128 && isalpha(cp)) {
-        int alt = islower(cp) ? toupper(cp) : tolower(cp);
-        for (i = 0; i < c->n; i++)
-            if (alt >= c->r[i].lo && alt <= c->r[i].hi) { hit = 1; break; }
+/* offset of the first occurrence of re->lit in s[start..len), or -1;
+   linear time (KMP) for long literals */
+static int find_literal(const Regex *re, const unsigned char *s, int len, int start) {
+    const unsigned char *lit = re->lit;
+    int m = re->nlit, i, j = 0;
+    if (len - start < m) return -1;
+    if (!re->kmp) {
+        const unsigned char *q = s + start, *end = s + len;
+        while (end - q >= m) {
+            q = memchr(q, lit[0], (size_t)(end - q) - (size_t)m + 1);
+            if (!q) return -1;
+            if (!memcmp(q + 1, lit + 1, (size_t)m - 1)) return (int)(q - s);
+            q++;
+        }
+        return -1;
     }
-    return hit != c->neg;
+    for (i = start; i < len; i++) {
+        if (j == 0) {
+            const unsigned char *q = memchr(s + i, lit[0], (size_t)(len - i));
+            if (!q) return -1;
+            i = (int)(q - s);
+        }
+        while (j > 0 && s[i] != lit[j]) j = re->kmp[j - 1];
+        if (s[i] == lit[j] && ++j == m) return i - m + 1;
+    }
+    return -1;
 }
 
-static int check_assert(int kind, int ml, const char *s, int len, int pos) {
-    switch (kind) {
-    case A_BOL: return pos == 0 || (ml && s[pos - 1] == '\n');
-    case A_EOL: return pos == len || (ml && s[pos] == '\n');
-    case A_BOT: return pos == 0;
-    case A_EOT: return pos == len;
-    case A_WORDB:
-    case A_NWORDB: {
-        int a = pos > 0 && ascii_word((unsigned char)s[pos - 1]);
-        int b = pos < len && ascii_word((unsigned char)s[pos]);
-        return (kind == A_WORDB) == (a != b);
+int re_search(const Regex *re, const char *str, int len, int start, int *caps, int ncap) {
+    const unsigned char *s = (const unsigned char *)str;
+    Regex *mre = (Regex *)re; /* the DFA caches are mutable scratch state */
+    int L, e, i, nslot;
+    if (!re || len < 0 || start > len) return 0;
+    if (start < 0) start = 0;
+    if (!s) {
+        if (len) return 0;
+        s = (const unsigned char *)"";
     }
+    if (re->nlit) {
+        L = find_literal(re, s, len, start);
+        if (L < 0) return 0;
+        e = L + re->nlit;
+    } else {
+        if (re->anchored && start > 0) return 0;
+        if (!re->dfa[0]) mre->dfa[0] = dfa_new(re, &re->fwd, 0, 0);
+        e = dfa_forward(re, re->dfa[0], s, len, start);
+        if (e < 0) return 0;
+        if (!re->dfa[1]) mre->dfa[1] = dfa_new(re, &re->rev, 1, 1);
+        L = dfa_backward(re->dfa[1], s, len, start, e);
+        if (L < 0) L = e; /* cannot happen */
     }
-    return 0;
-}
-
-typedef struct {
-    int pc, pos;
-    int capi, capv; /* capi >= 0: restore job */
-} Job;
-
-static Job *jobs;
-static int njobs_cap;
-/* visited (pc, pos) bitset, position-major relative to the search start.
-   Only the rows touched by a search are cleared afterwards, so the cost of
-   clearing is proportional to the work done. */
-static unsigned char *visit;
-static size_t visit_cap;   /* bytes */
-static int vis_base, vis_maxpos;
-static size_t vis_rows; /* positions covered by the table from vis_base */
-#define VISIT_MAX_BITS ((size_t)256 * 1024 * 1024)
-
-static int run(const Regex *re, const char *s, int len, int start, int *caps, int use_visit, long *budget) {
-    int sp = 0;
-    const Inst *prog = re->prog;
-#define PUSH(a, b, c, d)                                                       \
-    do {                                                                       \
-        if (sp == njobs_cap) {                                                 \
-            njobs_cap = njobs_cap ? njobs_cap * 2 : 256;                       \
-            jobs = xrealloc(jobs, sizeof *jobs * (size_t)njobs_cap);           \
-        }                                                                      \
-        jobs[sp].pc = (a); jobs[sp].pos = (b); jobs[sp].capi = (c); jobs[sp].capv = (d); sp++; \
-    } while (0)
-    PUSH(0, start, -1, 0);
-    while (sp > 0) {
-        Job j = jobs[--sp];
-        int pc, pos;
-        if (j.capi >= 0) { caps[j.capi] = j.capv; continue; }
-        pc = j.pc;
-        pos = j.pos;
-        for (;;) {
-            const Inst *in = &prog[pc];
-            if (use_visit && (size_t)(pos - vis_base) < vis_rows) {
-                size_t k = (size_t)(pos - vis_base) * (size_t)re->nprog + (size_t)pc;
-                unsigned char bit = (unsigned char)(1u << (k & 7));
-                if (visit[k >> 3] & bit) break;
-                visit[k >> 3] |= bit;
-                if (pos > vis_maxpos) vis_maxpos = pos;
-            } else if (--*budget < 0) {
-                return 0;
-            }
-            switch (in->op) {
-            case I_CHAR:
-                if (pos < len && (unsigned char)s[pos] == in->x) { pos++; pc++; continue; }
-                goto fail;
-            case I_CHARI:
-                if (pos < len && tolower((unsigned char)s[pos]) == in->x) { pos++; pc++; continue; }
-                goto fail;
-            case I_ANY:
-            case I_ANYNL: {
-                int cp, k;
-                if (pos >= len) goto fail;
-                if (in->op == I_ANY && s[pos] == '\n') goto fail;
-                k = utf8_decode(s + pos, len - pos, &cp);
-                pos += k;
-                pc++;
-                continue;
-            }
-            case I_CLASS: {
-                int cp, k;
-                if (pos >= len) goto fail;
-                k = utf8_decode(s + pos, len - pos, &cp);
-                if (!class_match(&re->classes[in->x], cp)) goto fail;
-                pos += k;
-                pc++;
-                continue;
-            }
-            case I_SPLIT:
-                PUSH(in->y, pos, -1, 0);
-                pc = in->x;
-                continue;
-            case I_JMP:
-                pc = in->x;
-                continue;
-            case I_SAVE:
-                if (in->x < 2 * re->ncap) {
-                    PUSH(0, 0, in->x, caps[in->x]);
-                    caps[in->x] = pos;
-                }
-                pc++;
-                continue;
-            case I_ASSERT:
-                if (check_assert(in->x, in->flag, s, len, pos)) { pc++; continue; }
-                goto fail;
-            case I_MATCH:
-                return 1;
-            }
-        fail:
-            break;
-        }
+    if (!caps || ncap <= 0) return 1;
+    caps[0] = L;
+    caps[1] = e;
+    for (i = 2; i < 2 * ncap; i++) caps[i] = -1;
+    nslot = 2 * (ncap < re->ncap ? ncap : re->ncap);
+    if (nslot > 2 && !pike(re, s, len, L, e, caps, nslot)) {
+        caps[0] = L; /* too big to track groups: report the whole match only */
+        caps[1] = e;
     }
-    return 0;
-#undef PUSH
-}
-
-int re_search(const Regex *re, const char *s, int len, int start, int *caps, int ncap) {
-    int localcaps[20];
-    int *cp = caps;
-    int n = 2 * re->ncap, i, use_visit, found = 0;
-    size_t cells = (size_t)re->nprog * ((size_t)(len - start) + 1);
-    long budget = 50000000;
-    if (start > len) return 0;
-    if (!caps || ncap < re->ncap) {
-        if (n <= 20) cp = localcaps;
-        else cp = xmalloc(sizeof(int) * (size_t)n);
-    }
-    for (i = 0; i < n; i++) cp[i] = -1;
-    /* Normally one table covers the whole search.  For huge inputs the table
-       is a window rebased at every start position (no sharing between start
-       positions, but still linear per attempt). */
-    use_visit = start >= 0;
-    {
-        int windowed = cells > VISIT_MAX_BITS;
-        size_t bytes = (windowed ? VISIT_MAX_BITS : cells) / 8 + 1;
-        vis_rows = windowed ? VISIT_MAX_BITS / (size_t)re->nprog : (size_t)(len - start) + 1;
-        if (vis_rows == 0) vis_rows = 1;
-        if (bytes > visit_cap) {
-            visit = xrealloc(visit, bytes);
-            memset(visit + visit_cap, 0, bytes - visit_cap);
-            visit_cap = bytes;
-        }
-        vis_base = start;
-        vis_maxpos = start - 1;
-        (void)windowed;
-    }
-    for (i = start; i <= len;) {
-        if (re->firstbyte >= 0) {
-            const char *f = memchr(s + i, re->firstbyte, (size_t)(len - i));
-            if (!f) break;
-            i = (int)(f - s);
-        }
-        if (cells > VISIT_MAX_BITS) {
-            /* windowed: rebase on this start position */
-            if (vis_maxpos >= vis_base) {
-                size_t endbit = (size_t)(vis_maxpos - vis_base + 1) * (size_t)re->nprog;
-                memset(visit, 0, endbit / 8 + 1 < visit_cap ? endbit / 8 + 1 : visit_cap);
-            }
-            vis_base = i;
-            vis_maxpos = i - 1;
-        }
-        if (run(re, s, len, i, cp, use_visit, &budget)) {
-            found = 1;
-            break;
-        }
-        if (re->anchored || budget < 0) break;
-        if (i >= len) break;
-        i = utf8_next(s, len, i);
-    }
-    if (use_visit && vis_maxpos >= vis_base) {
-        size_t endbit = (size_t)(vis_maxpos - vis_base + 1) * (size_t)re->nprog;
-        memset(visit, 0, endbit / 8 + 1 < visit_cap ? endbit / 8 + 1 : visit_cap);
-    }
-    if (found && cp != caps && caps)
-        for (n = 0; n < 2 * ncap && n < 2 * re->ncap; n++) caps[n] = cp[n];
-    if (cp != caps && cp != localcaps) free(cp);
-    return found;
+    return 1;
 }
 
 int re_match_str(const Regex *re, const char *s) {
