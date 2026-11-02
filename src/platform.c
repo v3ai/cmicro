@@ -37,6 +37,7 @@ static int raw_on = 0;
 static volatile sig_atomic_t winch_flag = 0;
 static volatile sig_atomic_t term_signal = 0;
 static int handlers_installed = 0;
+static int zero_reads = 0;
 
 static void on_winch(int sig) { (void)sig; winch_flag = 1; }
 
@@ -66,8 +67,13 @@ static void install_handlers(void) {
     sa.sa_handler = on_winch;
     sigaction(SIGWINCH, &sa, NULL);
     sa.sa_handler = on_term;
-    sigaction(SIGTERM, &sa, NULL);
-    sigaction(SIGHUP, &sa, NULL);
+    for (i = 0; i < 2; i++) {
+        int sig = i ? SIGHUP : SIGTERM;
+        struct sigaction old;
+        /* an inherited "ignore" (nohup) stays */
+        if (sigaction(sig, NULL, &old) == 0 && old.sa_handler == SIG_IGN) continue;
+        sigaction(sig, &sa, NULL);
+    }
     sa.sa_handler = on_fatal;
     sa.sa_flags = SA_RESETHAND;
     for (i = 0; i < sizeof fatal / sizeof fatal[0]; i++) {
@@ -134,10 +140,13 @@ int plat_read(char *buf, int n, int timeout_ms) {
     if (r <= 0) return (r < 0 && errno != EINTR) ? -1 : 0;
     if (p.revents & POLLNVAL) { term_signal = SIGHUP; return -1; }
     r = (int)read(STDIN_FILENO, buf, (size_t)n);
-    if (r > 0) return r;
+    if (r > 0) { zero_reads = 0; return r; }
     if (r < 0 && (errno == EAGAIN || errno == EINTR)) return 0;
-    /* end of file or an I/O error on the terminal: it is gone (a closed
-       pty sends no more input, and poll would keep returning at once) */
+    /* In raw mode (VMIN 0) a read of 0 bytes can just mean "nothing
+       yet", but a hangup, an I/O error, or poll reporting input that never
+       comes means the terminal is gone: poll would return at once forever
+       and the editor would spin.  Report it as SIGHUP. */
+    if (r == 0 && !(p.revents & (POLLHUP | POLLERR)) && ++zero_reads < 100) return 0;
     term_signal = SIGHUP;
     return -1;
 }

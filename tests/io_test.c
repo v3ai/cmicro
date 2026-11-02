@@ -130,8 +130,9 @@ static void test_undo(void) {
         for (k = 0; k < 60; k++) {
             Loc a = loc_make(rand() % 12, rand() % (b->nlines + 1));
             if (rand() % 3) {
-                static const char *ins[] = {"x", "\n", "ab\ncd", "\xe2\x82\xac", "\r\n", "", "\n\n\n"};
-                const char *s = ins[rand() % 7];
+                /* stray UTF-8 pieces too: they merge into characters */
+                static const char *ins[] = {"x", "\n", "ab\ncd", "\xe2\x82\xac", "\r\n", "", "\n\n\n", "\x81", "\xc3", "\xa9"};
+                const char *s = ins[rand() % 10];
                 buf_insert(b, a, s, (int)strlen(s));
             } else {
                 Loc z = loc_make(rand() % 12, rand() % (b->nlines + 1));

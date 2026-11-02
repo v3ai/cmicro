@@ -380,13 +380,30 @@ void buf_mark_saved(Buffer *b) { b->saved_id = b->cur_id; }
 
 Loc buf_end(const Buffer *b) { return loc_make(b->lines[b->nlines - 1].len, b->nlines - 1); }
 
-Loc buf_clamp(const Buffer *b, Loc l) {
+/* clamp into the text, without moving to a character boundary */
+static Loc clamp_range(const Buffer *b, Loc l) {
     if (l.y < 0) return loc_make(0, 0);
     if (l.y >= b->nlines) return buf_end(b);
     if (l.x < 0) l.x = 0;
     if (l.x > b->lines[l.y].len) l.x = b->lines[l.y].len;
-    /* snap to char boundary */
-    while (l.x > 0 && l.x < b->lines[l.y].len && ((unsigned char)b->lines[l.y].s[l.x] & 0xC0) == 0x80) l.x--;
+    return l;
+}
+
+Loc buf_clamp(const Buffer *b, Loc l) {
+    const Line *ln;
+    l = clamp_range(b, l);
+    ln = &b->lines[l.y];
+    /* snap to the start of the character containing x.  Every byte that
+       isn't a continuation byte starts a character, and an invalid
+       sequence is one character per byte (utf8_decode), so look back to
+       the nearest such byte and see whether its character covers x; a
+       stray continuation byte is a character of its own. */
+    if (l.x > 0 && l.x < ln->len && ((unsigned char)ln->s[l.x] & 0xC0) == 0x80) {
+        int j = l.x - 1, cp;
+        while (j > 0 && j > l.x - 3 && ((unsigned char)ln->s[j] & 0xC0) == 0x80) j--;
+        if (((unsigned char)ln->s[j] & 0xC0) != 0x80 && j + utf8_decode(ln->s + j, ln->len - j, &cp) > l.x)
+            l.x = j;
+    }
     return l;
 }
 
@@ -492,7 +509,7 @@ static Loc raw_insert(Buffer *b, Loc at, const char *text, int len) {
     int i, nl = 0, tail_len;
     char *tail;
     Loc end;
-    at = buf_clamp(b, at);
+    at = clamp_range(b, at);
     for (i = 0; i < len; i++) if (text[i] == '\n') nl++;
     ln = &b->lines[at.y];
     if (nl == 0) {
@@ -542,8 +559,8 @@ static Loc raw_insert(Buffer *b, Loc at, const char *text, int len) {
 
 static void raw_remove(Buffer *b, Loc a, Loc z) {
     Line *la, *lz;
-    a = buf_clamp(b, a);
-    z = buf_clamp(b, z);
+    a = clamp_range(b, a);
+    z = clamp_range(b, z);
     if (loc_cmp(a, z) >= 0) return;
     la = &b->lines[a.y];
     if (a.y == z.y) {

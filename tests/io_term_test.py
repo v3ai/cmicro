@@ -67,8 +67,9 @@ with tempfile.TemporaryDirectory() as d:
     check(open(f).read() == "one\ntwo\nthree\n", "file untouched by SIGTERM")
 
     # the terminal going away (pty closed, no SIGHUP): exit, don't spin
-    t = Term([MICRO, f], env=env)
-    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    g = os.path.join(d, "g.txt")
+    open(g, "w").write("x\n")
+    t = Term(["/bin/sh", "-c", "trap '' HUP; exec \"$0\" \"$1\"", MICRO, g], env=env)
     os.close(t.fd)
     end = time.time() + 3
     gone = False

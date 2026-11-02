@@ -820,6 +820,16 @@ int plat_save_close(PlatSave *s, int commit) {
                 if (!MoveFileExW(s->wtmp, s->wdest, MOVEFILE_REPLACE_EXISTING)) {
                     set_win_err(s->dest, GetLastError());
                     rc = -1;
+                    /* ReplaceFileW can fail after moving the old file
+                       away: then the temporary file is the only copy */
+                    if (GetFileAttributesW(s->wdest) == INVALID_FILE_ATTRIBUTES) {
+                        char *t = from_w(s->wtmp);
+                        snprintf(save_err, sizeof save_err, "%s: could not replace it; the text was saved as %s",
+                                 s->dest, t ? t : "a temporary file");
+                        free(t);
+                        save_free(s);
+                        return -1;
+                    }
                 }
             }
         }
