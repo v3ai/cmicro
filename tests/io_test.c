@@ -10,7 +10,17 @@
 #ifdef __linux__
 #define _GNU_SOURCE /* unshare() */
 #endif
+/* backup.c's reads of a backup go through test_load_file, which can be
+   made to fail (an I/O error on the backup) */
+#define buf_load_file test_load_file
 #include "../src/backup.c"
+#undef buf_load_file
+int buf_load_file(Buffer *b, const char *path);
+static int fail_backup_load;
+int test_load_file(Buffer *b, const char *path) {
+    if (fail_backup_load) return -1;
+    return buf_load_file(b, path);
+}
 
 #include <errno.h>
 #include <sys/stat.h>
@@ -451,6 +461,20 @@ static void test_backups(void) {
         CHECK(r && buf_modified(r));
         if (r) { r->path[0] = 0; buf_free(r); }
     }
+    /* recover, but the backup can't be read: an error, the file is not
+       opened (an empty buffer instead), and the backup is kept */
+    fail_backup_load = 1;
+    {
+        Buffer *r;
+        editor_clear_message();
+        r = buf_open(p, &err);
+        CHECK(r && r->nlines == 1 && r->lines[0].len == 0 && !*r->path && !buf_modified(r));
+        CHECK(E.msg && E.msg_error && strstr(E.msg, "Could not read the backup"));
+        editor_clear_message();
+        buf_free(r);
+        CHECK(lstat(bf, &st) == 0 && S_ISREG(st.st_mode));
+    }
+    fail_backup_load = 0;
     /* someone else's file / a symlink in the backup dir is not offered */
     unlink(bf);
     CHECK(symlink(p, bf) == 0);

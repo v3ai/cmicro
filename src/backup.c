@@ -159,7 +159,8 @@ int backup_check_on_open(Buffer *b) {
         /* recover into a scratch buffer first: a failed read must not
            leave the real one half replaced */
         Buffer *tmp = buf_new_empty();
-        if (buf_load_file(tmp, path) == 0) {
+        int ok = buf_load_file(tmp, path) == 0;
+        if (ok) {
             char *text;
             int len, bom = tmp->bom;
             text = buf_full_text(tmp, &len);
@@ -175,6 +176,13 @@ int backup_check_on_open(Buffer *b) {
             buf_invalidate_hl(b, 0);
         }
         buf_free(tmp);
+        if (!ok) {
+            /* say so, and take the 'abort' way out: the buffer is
+               discarded (not closed), so the backup is kept */
+            editor_set_error("Could not read the backup %s; it was kept and the file was not opened", path);
+            free(path);
+            return -1;
+        }
         free(path);
         return 1;
     }
