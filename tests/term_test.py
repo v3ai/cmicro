@@ -186,6 +186,30 @@ def test_wordwrap_wide_char_after_break():
     assert finish(t)
 
 
+def test_hlsearch_softwrap_rows():
+    # search matches are found once per line and reused for its wrap
+    # rows: every row of a wrapped line, and the next line, still
+    # highlight exactly the matches
+    p = write("hl.txt", b"start\n" + b"abQdefghi" * 6 + b"\nzzQzz\nQ\n")
+    t = editor([p], cols=20, rows=10, extra=["-ruler", "off", "-softwrap", "on", "-hlsearch", "on"])
+    t.send(CTRL("f") + b"Q" + ENTER, 0.4)
+    quiet(t)
+    hl = t.screen.buffer[2][0].bg  # a match on the second wrap row
+    assert hl != t.screen.buffer[2][1].bg, t.text()
+    nq = 0
+    for y in range(1, 6):
+        row = t.screen.buffer[y]
+        for x in range(20):
+            if row[x].data == "Q":
+                nq += 1
+                assert row[x].bg == hl, (y, x, t.text())
+            elif row[x].data != " ":
+                assert row[x].bg != hl, (y, x, t.text())
+    assert nq == 8, t.text()
+    assert full_redraw_matches(t)
+    assert finish(t)
+
+
 def test_many_tabs_and_splits():
     p = write("t.txt", b"x\n")
     t = editor([p], cols=60, rows=20)
