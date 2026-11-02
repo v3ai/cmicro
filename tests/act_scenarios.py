@@ -559,6 +559,18 @@ def bind_unreadable_bindings(t, env):
     assert "cannot read bindings.json" in t.text(), t.text()
 
 
+@with_env(bindings='{"Ctrl-x":"Undo","F3":"Redo","Ctrl-x":"Cut","F3":"Copy"}')
+def bind_duplicate_keys(t, env):
+    """bind/unbind on a key bindings.json holds twice: the later entry wins
+    on reload, so it must not survive"""
+    import json
+    cmd(t, "bind Ctrl-x Paste", 0.4)
+    cmd(t, "unbind F3", 0.4)
+    with open(os.path.join(env.cfg, "bindings.json")) as f:
+        pairs = json.load(f, object_pairs_hook=list)
+    assert pairs == [("Ctrl-x", "Paste")], pairs
+
+
 SCENARIOS = [rebind_running_key, replace_dollar_overflow, goto_huge_numbers,
              replaceall_empty_matches, replace_interactive_quit, multicursor_edits,
              autocomplete_then_edit, macro_with_quit_and_prompt, long_command_binding,
@@ -567,7 +579,7 @@ SCENARIOS = [rebind_running_key, replace_dollar_overflow, goto_huge_numbers,
              replaceall_results, replaceall_groups, replaceall_empty_pattern, replaceall_selection,
              replace_interactive_results, tabsize_fraction, wheel_closes_other_pane,
              nul_lines_move_dup, duplicate_selection_lines, autocomplete_cycle, smartpaste,
-             open_over_unnamed_save, bind_unreadable_bindings]
+             open_over_unnamed_save, bind_unreadable_bindings, bind_duplicate_keys]
 
 if __name__ == "__main__":
     only = os.environ.get("ONLY")
