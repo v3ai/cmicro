@@ -68,4 +68,36 @@ const char *plat_default_fileformat(void); /* "unix" or "dos" */
 int   plat_clipboard_set(const char *s, int len);
 char *plat_clipboard_get(int *len);     /* malloc'd, NULL if unavailable */
 
+/* ---- safe file writing (additions) ----
+   plat_save_open() starts writing `path`.  When `path` is an existing
+   regular file we own with a single link, the data goes to a new
+   temporary file in the same directory, which atomically replaces the
+   file on commit (with its mode and group); otherwise the file is
+   rewritten in place, after making sure the disk space is there.
+   Symbolic links are followed, so the file they point to is saved.
+   `size` is the exact number of bytes that will be written (-1: unknown).
+   With PLAT_SAVE_PRIVATE (backups, cursor positions) a new file gets mode
+   0600 and a symlink at `path` is replaced, never followed.
+   On failure it returns NULL and sets *denied when permission was the
+   problem (the caller may then offer `sudo`). */
+#define PLAT_SAVE_PRIVATE 1
+typedef struct PlatSave PlatSave;
+PlatSave   *plat_save_open(const char *path, long long size, int flags, int *denied);
+int         plat_save_write(PlatSave *s, const void *data, size_t n); /* 0 or -1 */
+int         plat_save_close(PlatSave *s, int commit); /* 0 on success; frees s */
+const char *plat_save_error(void);    /* reason for the last failure */
+
+/* new temporary file (mode 0600, created exclusively, unpredictable
+   name) in the temp dir; *path gets its malloc'd name */
+FILE *plat_temp_file(const char *tag, char **path);
+/* run argv[0] (searched in PATH) without a shell, stdin from `in_path`
+   (NULL: null device), stdout/stderr to the null device; waits for it.
+   Returns its exit status, -1 if it could not be run. */
+int   plat_run(const char *const *argv, const char *in_path);
+int   plat_mkdir_private(const char *path); /* mkdir -p; new dirs get 0700 */
+int   plat_owns_file(const char *path); /* a regular file (not a symlink) of ours */
+/* a termination request (SIGTERM, SIGHUP, the terminal going away) since
+   the last call: its signal number, else 0 */
+int   plat_take_signal(void);
+
 #endif
