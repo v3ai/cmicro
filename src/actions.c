@@ -326,11 +326,52 @@ static unsigned long long rand64(void) {
    failure).  The name is unpredictable and, on POSIX systems, the file is
    created exclusively (fopen "x" = O_CREAT|O_EXCL), so a file or symlink
    planted in the shared temp directory is never opened, truncated or
-   followed.  Optionally fills it with `data`.  Used by the clipboard tools
+   followed (on POSIX inside a private 0700 directory, see temp_dir_for).
+   Optionally fills it with `data`.  Used by the clipboard tools
    here and by `run`/`textfilter` in commands.c. */
-char *act_tmpfile_create(const char *tag, const char *data, int len) {
+static char *private_tmp; /* POSIX: a mode 0700 directory of our own */
+
+static void private_tmp_cleanup(void) {
+    if (private_tmp) plat_remove(private_tmp); /* empty by now */
+    free(private_tmp);
+    private_tmp = NULL;
+}
+
+/* ISO C can't set file permissions, so on POSIX the files go into a
+   directory the shell creates with umask 077 (mkdir fails rather than
+   reuse anything already there): other users can't read clipboard or
+   filter text while it sits on disk. */
+static char *temp_dir_for(int posix) {
+    static int tried;
     char *dir = plat_temp_dir();
+    if (!posix) return dir;
+    if (!tried) {
+        char *path, *q, *cmd;
+        unsigned long long r = rand64();
+        tried = 1;
+        path = xsprintf("%s/micro-%08lx%08lx", dir && *dir ? dir : ".",
+                        (unsigned long)(r >> 32) & 0xffffffffUL, (unsigned long)r & 0xffffffffUL);
+        q = plat_shell_quote(path);
+        cmd = q ? xsprintf("umask 077 && mkdir %s 2>/dev/null", q) : NULL;
+        if (cmd && plat_system(cmd) == 0) {
+            private_tmp = path;
+            path = NULL;
+            atexit(private_tmp_cleanup);
+        }
+        free(cmd);
+        free(q);
+        free(path);
+    }
+    if (private_tmp && plat_is_dir(private_tmp)) {
+        free(dir);
+        return xstrdup(private_tmp);
+    }
+    return dir;
+}
+
+char *act_tmpfile_create(const char *tag, const char *data, int len) {
     int posix = !strcmp(plat_null_device(), "/dev/null");
+    char *dir = temp_dir_for(posix);
     int tries;
     for (tries = 0; tries < 16; tries++) {
         unsigned long long r1 = rand64(), r2 = rand64();
