@@ -5,6 +5,7 @@
 #include "platform.h"
 #include "runtime.h"
 
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,14 +19,19 @@ void backup_flush_all(void);                 /* backup.c */
 int term_ready;
 
 /* print text for the cooked-mode terminal with control characters (C0
-   except newline/tab, DEL, and UTF-8-encoded C1) shown as '?', so a file
-   name can't smuggle escape sequences to the terminal */
+   except newline/tab, DEL, C1) and bytes that aren't valid UTF-8 shown
+   as '?', so a file name can't smuggle escape sequences to the terminal
+   (a raw 0x9B is CSI on an 8-bit terminal) */
 static void put_sanitized(FILE *f, const char *s) {
-    const unsigned char *p = (const unsigned char *)s;
-    for (; *p; p++) {
-        if (*p == 0xC2 && p[1] >= 0x80 && p[1] <= 0x9F) { fputc('?', f); p++; }
-        else if ((*p < 0x20 && *p != '\n' && *p != '\t') || *p == 0x7F) fputc('?', f);
-        else fputc(*p, f);
+    size_t len = strlen(s), i = 0;
+    while (i < len) {
+        int cp, n = utf8_decode(s + i, len - i > 4 ? 4 : (int)(len - i), &cp);
+        if ((cp == 0xFFFD && n == 1) || (cp < 0x20 && cp != '\n' && cp != '\t') || cp == 0x7F ||
+            (cp >= 0x80 && cp <= 0x9F))
+            fputc('?', f);
+        else
+            fwrite(s + i, 1, (size_t)n, f);
+        i += (size_t)n;
     }
 }
 
@@ -315,6 +321,7 @@ int main(int argc, char **argv) {
 
     {
         long long last_check = 0;
+        int sig;
         while (!E.quit && E.ntabs > 0) {
             InEvent ev;
             int handled = 0;
@@ -332,14 +339,18 @@ int main(int argc, char **argv) {
                 }
             }
             editor_autosave_tick();
-            if (plat_take_signal()) {
+            if ((sig = plat_take_signal()) != 0) {
                 /* SIGTERM / SIGHUP / the terminal went away: keep the
                    unsaved changes as backups (they are offered for
-                   recovery next time) and leave */
+                   recovery next time) and leave, dying of the signal
+                   so the parent sees how we ended */
                 backup_flush_all();
                 history_save();
                 cleanup();
-                return 1;
+                fflush(NULL);
+                signal(sig, SIG_DFL);
+                raise(sig);
+                return 128 + sig;
             }
             if (plat_now_ms() - last_check > 1000) {
                 last_check = plat_now_ms();
