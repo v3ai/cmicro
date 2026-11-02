@@ -9,7 +9,23 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../src/regex.h"
-#include "../src/util.h"
+
+/* width of the character at s (n > 0 bytes left), by Go's UTF-8 rules:
+   surrogates, overlongs and anything invalid count as one byte */
+static int go_width(const unsigned char *s, int n) {
+    int c = s[0], lo = 0x80, hi = 0xBF, need;
+    if (c < 0x80) return 1;
+    if (c < 0xC2 || c > 0xF4) return 1;
+    need = c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+    if (c == 0xE0) lo = 0xA0;
+    else if (c == 0xED) hi = 0x9F;
+    else if (c == 0xF0) lo = 0x90;
+    else if (c == 0xF4) hi = 0x8F;
+    if (n < need || s[1] < lo || s[1] > hi) return 1;
+    if (need > 2 && (s[2] < 0x80 || s[2] > 0xBF)) return 1;
+    if (need > 3 && (s[3] < 0x80 || s[3] > 0xBF)) return 1;
+    return need;
+}
 
 static int unhex(const char *h, char *out) {
     int n = 0;
@@ -48,7 +64,7 @@ int main(void) {
             if (!re_search(re, subj, slen, pos, caps, ncap)) break;
             if (caps[1] == pos) {
                 if (caps[0] == prev_end) accept = 0;
-                pos = pos < slen ? utf8_next(subj, slen, pos) : slen + 1;
+                pos = pos < slen ? pos + go_width((unsigned char *)subj + pos, slen - pos) : slen + 1;
             } else {
                 pos = caps[1];
             }
