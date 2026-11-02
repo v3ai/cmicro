@@ -651,10 +651,11 @@ static void goto_line_col(Pane *p, int line, int col) {
     Buffer *b = p->buf;
     if (line < 0) return;
     if (line == 0) line = 1;
+    cur_deselect(c, 1); /* before moving: deselecting jumps to the selection start */
     c->loc.y = clampi(line - 1, 0, b->nlines - 1);
     c->loc.x = col > 0 ? utf8_offset(b->lines[c->loc.y].s, b->lines[c->loc.y].len, col - 1) : 0;
     c->loc = buf_clamp(b, c->loc);
-    cur_deselect(c, 1);
+    c->sel[0] = c->sel[1] = c->orig[0] = c->orig[1] = c->loc;
     cur_store_vx(p, c);
     pane_relocate(p);
 }
