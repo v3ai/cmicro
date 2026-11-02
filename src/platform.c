@@ -470,6 +470,7 @@ struct PlatSave {
     int failed;
     int is_reg;   /* in place on a regular file: truncate at the end */
     int priv;     /* PLAT_SAVE_PRIVATE */
+    int keep_tmp; /* an in-place copy failed part-way: tmp holds the only full copy */
     size_t nbuf;
     char buf[1 << 16];
 };
@@ -522,16 +523,47 @@ static int reserve_space(int fd, off_t old_size, long long size) {
     return 0;
 }
 
+#ifdef __linux__
+/* copy the extended attributes of `src` (ACLs, SELinux labels, file
+   capabilities, user.* ...) onto the new file `fd`: 0 when all of them
+   were copied (or there are none / the file system has none), -1 if any
+   couldn't be, in which case the file must be rewritten in place */
+static int copy_xattrs(const char *src, int fd) {
+    ssize_t n = listxattr(src, NULL, 0), m;
+    char *names, *p, *val = NULL;
+    size_t valcap = 0;
+    int rc = 0;
+    if (n < 0) return errno == ENOTSUP || errno == EOPNOTSUPP ? 0 : -1;
+    if (n == 0) return 0;
+    names = malloc((size_t)n);
+    if (!names) return -1;
+    m = listxattr(src, names, (size_t)n);
+    if (m < 0 || m > n) { free(names); return -1; }
+    for (p = names; rc == 0 && p < names + m; p += strlen(p) + 1) {
+        ssize_t v = getxattr(src, p, NULL, 0);
+        if (v < 0) { rc = -1; break; }
+        if ((size_t)v + 1 > valcap) {
+            char *nv = realloc(val, (size_t)v + 1);
+            if (!nv) { rc = -1; break; }
+            val = nv;
+            valcap = (size_t)v + 1;
+        }
+        v = getxattr(src, p, val, valcap);
+        if (v < 0 || fsetxattr(fd, p, val, (size_t)v, 0) != 0) rc = -1;
+    }
+    free(val);
+    free(names);
+    return rc;
+}
+#endif
+
 /* does the file carry extended attributes (ACLs, security labels, file
    capabilities, user.* attributes)?  A new inode wouldn't have them, so
-   such a file is rewritten in place.  When unsure, say yes. */
+   such a file is rewritten in place.  When unsure, say yes.  (Linux
+   copies them to the new file instead, see copy_xattrs.) */
 static int has_xattrs(const char *path) {
-#if defined(__linux__) || defined(__APPLE__)
-#ifdef __APPLE__
+#if defined(__APPLE__)
     ssize_t n = listxattr(path, NULL, 0, 0);
-#else
-    ssize_t n = listxattr(path, NULL, 0);
-#endif
     if (n < 0) {
 #ifdef ENOTSUP
         if (errno == ENOTSUP) return 0;
@@ -563,6 +595,7 @@ PlatSave *plat_save_open(const char *path, long long size, int flags, int *denie
     s->is_reg = 0;
     s->nbuf = 0;
     s->priv = priv != 0;
+    s->keep_tmp = 0;
     if (priv) {
         /* never follow a symlink planted at a state-file path */
         have = lstat(path, &st) == 0;
@@ -595,6 +628,10 @@ PlatSave *plat_save_open(const char *path, long long size, int flags, int *denie
                     if (fstat(fd, &ts) == 0 && ts.st_gid != st.st_gid)
                         ok = fchown(fd, (uid_t)-1, st.st_gid) == 0;
                 }
+#ifdef __linux__
+                /* after fchmod: an ACL also sets the group mode bits */
+                if (ok) ok = copy_xattrs(s->dest, fd) == 0;
+#endif
             }
             if (ok) {
                 s->fd = fd;
@@ -672,12 +709,13 @@ int plat_save_write(PlatSave *s, const void *data, size_t n) {
 /* rename() couldn't replace s->dest (EBUSY: it is a bind mount, say):
    copy the finished temporary file over it in place instead */
 static int copy_into_dest(PlatSave *s) {
-    int in, out, rc = -1, e = 0;
+    int in, out, rc = -1, e = 0, touched = 0;
     struct stat ts, ds;
     in = open(s->tmp, O_RDONLY | O_CLOEXEC);
     if (in < 0) { set_err(s->dest, errno); return -1; }
     out = open(s->dest, O_WRONLY | O_CLOEXEC | (s->priv ? O_NOFOLLOW : 0));
-    if (out < 0 || fstat(in, &ts) != 0 || fstat(out, &ds) != 0) { e = errno; goto done; }
+    if (out < 0) { e = errno; goto done; }
+    if (fstat(in, &ts) != 0 || fstat(out, &ds) != 0) { e = errno; goto done; }
     if (S_ISREG(ds.st_mode) && reserve_space(out, ds.st_size, (long long)ts.st_size) != 0) {
         e = errno;
         goto done;
@@ -690,6 +728,7 @@ static int copy_into_dest(PlatSave *s) {
             goto done;
         }
         if (n == 0) break;
+        touched = 1;
         if (write_all(out, s->buf, (size_t)n) != 0) { e = errno; goto done; }
     }
     if (S_ISREG(ds.st_mode) && ftruncate(out, ts.st_size) != 0) { e = errno; goto done; }
@@ -698,7 +737,16 @@ static int copy_into_dest(PlatSave *s) {
 done:
     if (out >= 0 && close(out) != 0 && rc == 0) { e = errno; rc = -1; }
     close(in);
-    if (rc != 0) set_err(s->dest, e);
+    if (rc != 0) {
+        set_err(s->dest, e);
+        if (touched) {
+            /* dest may now be half rewritten: keep the complete new
+               contents and say where they are */
+            size_t l = strlen(save_err);
+            s->keep_tmp = 1;
+            snprintf(save_err + l, sizeof save_err - l, "; new contents kept in %s", s->tmp);
+        }
+    }
     return rc;
 }
 
@@ -731,7 +779,7 @@ int plat_save_close(PlatSave *s, int commit) {
                 }
             }
         }
-        if (!renamed) unlink(s->tmp);
+        if (!renamed && !s->keep_tmp) unlink(s->tmp);
         free(s->tmp);
     }
     free(s->dest);
