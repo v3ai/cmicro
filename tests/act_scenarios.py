@@ -548,6 +548,17 @@ def open_over_unnamed_save(t, env):
     assert got == b"hello\n" or got == b"hello", got
 
 
+def bind_unreadable_bindings(t, env):
+    """bind must not replace a bindings.json it cannot read (here: too large
+    for read_file) with a file holding only the new binding"""
+    path = os.path.join(env.cfg, "bindings.json")
+    with open(path, "wb") as f:
+        f.truncate(3 << 30)  # sparse, > INT_MAX bytes
+    cmd(t, "bind F5 Redo", 0.4)
+    assert os.path.getsize(path) == 3 << 30, os.path.getsize(path)
+    assert "cannot read bindings.json" in t.text(), t.text()
+
+
 SCENARIOS = [rebind_running_key, replace_dollar_overflow, goto_huge_numbers,
              replaceall_empty_matches, replace_interactive_quit, multicursor_edits,
              autocomplete_then_edit, macro_with_quit_and_prompt, long_command_binding,
@@ -556,7 +567,7 @@ SCENARIOS = [rebind_running_key, replace_dollar_overflow, goto_huge_numbers,
              replaceall_results, replaceall_groups, replaceall_empty_pattern, replaceall_selection,
              replace_interactive_results, tabsize_fraction, wheel_closes_other_pane,
              nul_lines_move_dup, duplicate_selection_lines, autocomplete_cycle, smartpaste,
-             open_over_unnamed_save]
+             open_over_unnamed_save, bind_unreadable_bindings]
 
 if __name__ == "__main__":
     only = os.environ.get("ONLY")
