@@ -13,6 +13,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <aclapi.h>
 #include <shellapi.h>
 #include <direct.h>
 #include <fcntl.h>
@@ -724,9 +725,14 @@ const char *plat_save_error(void) { return save_err[0] ? save_err : "unknown err
 struct PlatSave {
     HANDLE h;
     wchar_t *wtmp;  /* temporary file that replaces wdest on commit, or NULL */
-    wchar_t *wdest;
-    char *dest;
+    wchar_t *wdest; /* the file itself (links resolved) */
+    char *dest;     /* the name the caller gave, for messages */
     int failed;
+    int priv;       /* PLAT_SAVE_PRIVATE */
+    int inplace;    /* writing wdest directly */
+    int created;    /* ... which did not exist before */
+    int written;    /* any data written */
+    LARGE_INTEGER old_size; /* in place: wdest's length before, -1: a device */
 };
 
 static int denied_err(DWORD e) {
@@ -740,21 +746,117 @@ static void save_free(PlatSave *s) {
     free(s);
 }
 
+/* the path of the file open as h (links resolved), without the \\?\
+   prefix when it fits in MAX_PATH; malloc'd, NULL on failure */
+static wchar_t *final_path(HANDLE h) {
+    const DWORD fl = FILE_NAME_NORMALIZED | VOLUME_NAME_DOS;
+    DWORD n = GetFinalPathNameByHandleW(h, NULL, 0, fl), r;
+    wchar_t *p;
+    size_t len;
+    if (n == 0) return NULL;
+    p = malloc(sizeof(wchar_t) * ((size_t)n + 1));
+    if (!p) return NULL;
+    r = GetFinalPathNameByHandleW(h, p, n + 1, fl);
+    if (r == 0 || r > n) { free(p); return NULL; }
+    len = wcslen(p);
+    if (wcsncmp(p, L"\\\\?\\UNC\\", 8) == 0) {
+        if (len - 6 < MAX_PATH) memmove(p + 2, p + 8, sizeof(wchar_t) * (len - 7)); /* \\server\share\... */
+    } else if (wcsncmp(p, L"\\\\?\\", 4) == 0 && p[4] && p[5] == L':') {
+        if (len - 4 < MAX_PATH) memmove(p, p + 4, sizeof(wchar_t) * (len - 3)); /* C:\... */
+    }
+    return p;
+}
+
+/* make the file open as h at least `size` bytes long (-1: unknown), so the
+   writes cannot run out of disk space; on failure the old length is put
+   back and the error returned.  Leaves the file pointer at 0.  *old gets
+   the old length, -1 for a device (nothing to reserve or truncate). */
+static DWORD reserve_space(HANDLE h, long long size, LARGE_INTEGER *old) {
+    LARGE_INTEGER want, zero;
+    zero.QuadPart = 0;
+    if (GetFileType(h) != FILE_TYPE_DISK || !GetFileSizeEx(h, old)) {
+        old->QuadPart = -1;
+        return 0;
+    }
+    if (size > old->QuadPart) {
+        want.QuadPart = size;
+        /* NTFS allocates the clusters here: a full disk or quota fails now */
+        if (!SetFilePointerEx(h, want, NULL, FILE_BEGIN) || !SetEndOfFile(h)) {
+            DWORD e = GetLastError();
+            if (SetFilePointerEx(h, *old, NULL, FILE_BEGIN)) SetEndOfFile(h);
+            return e ? e : ERROR_DISK_FULL;
+        }
+    }
+    if (!SetFilePointerEx(h, zero, NULL, FILE_BEGIN)) return GetLastError();
+    return 0;
+}
+
+/* rewrite s->wdest in place.  It is not truncated: the data is written
+   over the old contents, and only the surplus is cut off on commit. */
+static int open_in_place(PlatSave *s, long long size, int *denied) {
+    DWORD e;
+    s->h = CreateFileW(s->wdest, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
+                       FILE_ATTRIBUTE_NORMAL, NULL);
+    if (s->h == INVALID_HANDLE_VALUE) {
+        e = GetLastError();
+        set_win_err(s->dest, e);
+        if (denied) *denied = denied_err(e);
+        return -1;
+    }
+    s->created = GetLastError() != ERROR_ALREADY_EXISTS;
+    s->inplace = 1;
+    e = reserve_space(s->h, size, &s->old_size);
+    if (e != 0) {
+        set_win_err(s->dest, e);
+        CloseHandle(s->h);
+        s->h = INVALID_HANDLE_VALUE;
+        if (s->created) DeleteFileW(s->wdest);
+        return -1;
+    }
+    return 0;
+}
+
 PlatSave *plat_save_open(const char *path, long long size, int flags, int *denied) {
     PlatSave *s = calloc(1, sizeof *s);
     wchar_t *wdir;
-    DWORD a;
-    (void)size;
-    (void)flags; /* the profile directories are per-user already */
+    DWORD a, la;
+    int inplace = 0;
     if (denied) *denied = 0;
     save_err[0] = 0;
     if (!s) return NULL;
     s->h = INVALID_HANDLE_VALUE;
+    s->priv = (flags & PLAT_SAVE_PRIVATE) != 0;
     s->wdest = to_w(path);
     s->dest = malloc(strlen(path) + 1);
     if (!s->wdest || !s->dest) { save_free(s); return NULL; }
     strcpy(s->dest, path);
-    a = GetFileAttributesW(s->wdest);
+    a = la = GetFileAttributesW(s->wdest); /* of a link itself */
+    if (la != INVALID_FILE_ATTRIBUTES && !s->priv) {
+        /* follow links: the file they point to is saved, and its directory
+           gets the temporary file.  Files with several hard links are
+           rewritten in place so that every name sees the new text. */
+        HANDLE q = CreateFileW(s->wdest, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+        if (q == INVALID_HANDLE_VALUE) {
+            inplace = 1; /* e.g. a dangling link: write through it */
+        } else {
+            BY_HANDLE_FILE_INFORMATION fi;
+            wchar_t *real = final_path(q);
+            if (GetFileInformationByHandle(q, &fi)) {
+                a = fi.dwFileAttributes;
+                if (fi.nNumberOfLinks != 1) inplace = 1;
+            } else {
+                inplace = 1;
+            }
+            if (real) {
+                free(s->wdest);
+                s->wdest = real;
+            } else if (la & FILE_ATTRIBUTE_REPARSE_POINT) {
+                inplace = 1;
+            }
+            CloseHandle(q);
+        }
+    }
     if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_READONLY)) {
         set_win_err(path, ERROR_ACCESS_DENIED);
         if (denied) *denied = 1;
@@ -762,7 +864,7 @@ PlatSave *plat_save_open(const char *path, long long size, int flags, int *denie
         return NULL;
     }
     /* write a temporary file next to the target, then swap it in */
-    wdir = malloc(sizeof(wchar_t) * (wcslen(s->wdest) + 2));
+    wdir = inplace ? NULL : malloc(sizeof(wchar_t) * (wcslen(s->wdest) + 2));
     if (wdir) {
         wchar_t *q, *slash = NULL;
         wcscpy(wdir, s->wdest);
@@ -779,12 +881,13 @@ PlatSave *plat_save_open(const char *path, long long size, int flags, int *denie
         free(wdir);
     }
     if (s->h == INVALID_HANDLE_VALUE) {
-        /* rewrite in place */
-        s->h = CreateFileW(s->wdest, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (s->h == INVALID_HANDLE_VALUE) {
-            DWORD e = GetLastError();
-            set_win_err(path, e);
-            if (denied) *denied = denied_err(e);
+        /* a private file's link is replaced, never written through */
+        if (s->priv && la != INVALID_FILE_ATTRIBUTES && (la & FILE_ATTRIBUTE_REPARSE_POINT)) {
+            set_win_err(path, ERROR_ACCESS_DENIED);
+            save_free(s);
+            return NULL;
+        }
+        if (open_in_place(s, size, denied) != 0) {
             save_free(s);
             return NULL;
         }
@@ -797,6 +900,7 @@ int plat_save_write(PlatSave *s, const void *data, size_t n) {
     if (s->failed) return -1;
     while (n > 0) {
         DWORD w = 0, chunk = n > 0x10000000 ? 0x10000000 : (DWORD)n;
+        s->written = 1;
         if (!WriteFile(s->h, p, chunk, &w, NULL) || w == 0) {
             set_win_err(s->dest, GetLastError());
             s->failed = 1;
@@ -808,45 +912,133 @@ int plat_save_write(PlatSave *s, const void *data, size_t n) {
     return 0;
 }
 
+/* copy the temporary file over s->wdest in place; 0 or the error, with
+   *touched set once the target may have been partly overwritten */
+static DWORD copy_in_place(PlatSave *s, int *touched) {
+    HANDLE in, out;
+    LARGE_INTEGER len, old;
+    DWORD e;
+    char *buf;
+    *touched = 0;
+    in = CreateFileW(s->wtmp, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    if (in == INVALID_HANDLE_VALUE) return GetLastError();
+    out = CreateFileW(s->wdest, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                      FILE_ATTRIBUTE_NORMAL, NULL);
+    if (out == INVALID_HANDLE_VALUE) {
+        e = GetLastError();
+        CloseHandle(in);
+        return e;
+    }
+    buf = malloc(65536);
+    if (!buf) e = ERROR_NOT_ENOUGH_MEMORY;
+    else if (!GetFileSizeEx(in, &len)) e = GetLastError();
+    else e = reserve_space(out, len.QuadPart, &old);
+    if (e == 0) {
+        DWORD r, w;
+        *touched = 1;
+        for (;;) {
+            if (!ReadFile(in, buf, 65536, &r, NULL)) { e = GetLastError(); break; }
+            if (r == 0) break;
+            if (!WriteFile(out, buf, r, &w, NULL) || w != r) { e = w != r ? ERROR_WRITE_FAULT : GetLastError(); break; }
+        }
+        if (e == 0 && old.QuadPart >= 0 && !SetEndOfFile(out)) e = GetLastError();
+        if (e == 0 && !FlushFileBuffers(out)) e = GetLastError();
+    }
+    free(buf);
+    CloseHandle(out);
+    CloseHandle(in);
+    return e;
+}
+
+/* put the finished temporary file in place of s->wdest; 0 or -1 */
+static int swap_in(PlatSave *s) {
+    DWORD da = GetFileAttributesW(s->wdest), e;
+    int touched = 0;
+    if (da == INVALID_FILE_ATTRIBUTES || s->priv) {
+        /* a new file, or a private one: nothing to keep, and a link at its
+           name is replaced rather than followed */
+        if (MoveFileExW(s->wtmp, s->wdest, MOVEFILE_REPLACE_EXISTING)) return 0;
+        e = GetLastError();
+        if (da == INVALID_FILE_ATTRIBUTES || (da & FILE_ATTRIBUTE_REPARSE_POINT)) goto failed;
+    } else {
+        /* keeps the target's attributes, ACL, streams and file ID */
+        if (ReplaceFileW(s->wdest, s->wtmp, NULL, REPLACEFILE_IGNORE_MERGE_ERRORS, NULL, NULL)) return 0;
+        e = GetLastError();
+        if (GetFileAttributesW(s->wdest) == INVALID_FILE_ATTRIBUTES) {
+            /* ReplaceFileW failed after moving the old file away */
+            if (MoveFileExW(s->wtmp, s->wdest, MOVEFILE_REPLACE_EXISTING)) return 0;
+            e = GetLastError();
+            goto failed;
+        }
+    }
+    /* the file cannot be replaced (a file system without ReplaceFileW,
+       another program has it open without FILE_SHARE_DELETE, we may not
+       delete it), and renaming over it would lose its attributes and ACL:
+       rewrite it in place */
+    e = copy_in_place(s, &touched);
+    if (e == 0) {
+        DeleteFileW(s->wtmp);
+        return 0;
+    }
+failed:
+    set_win_err(s->dest, e);
+    if (touched || GetFileAttributesW(s->wdest) == INVALID_FILE_ATTRIBUTES) {
+        /* the temporary file is the only complete copy */
+        char *t = from_w(s->wtmp);
+        snprintf(save_err, sizeof save_err, "%s: could not replace it; the text was saved as %s", s->dest,
+                 t ? t : "a temporary file");
+        free(t);
+        return -1;
+    }
+    DeleteFileW(s->wtmp);
+    return -1;
+}
+
 int plat_save_close(PlatSave *s, int commit) {
     int rc = s->failed ? -1 : 0;
-    if (rc == 0 && commit && !FlushFileBuffers(s->h)) { set_win_err(s->dest, GetLastError()); rc = -1; }
-    CloseHandle(s->h);
-    if (s->wtmp) {
-        if (rc == 0 && commit) {
-            /* ReplaceFileW keeps the target's attributes and ACL */
-            if (GetFileAttributesW(s->wdest) == INVALID_FILE_ATTRIBUTES ||
-                !ReplaceFileW(s->wdest, s->wtmp, NULL, REPLACEFILE_IGNORE_MERGE_ERRORS, NULL, NULL)) {
-                if (!MoveFileExW(s->wtmp, s->wdest, MOVEFILE_REPLACE_EXISTING)) {
-                    set_win_err(s->dest, GetLastError());
-                    rc = -1;
-                    /* ReplaceFileW can fail after moving the old file
-                       away: then the temporary file is the only copy */
-                    if (GetFileAttributesW(s->wdest) == INVALID_FILE_ATTRIBUTES) {
-                        char *t = from_w(s->wtmp);
-                        snprintf(save_err, sizeof save_err, "%s: could not replace it; the text was saved as %s",
-                                 s->dest, t ? t : "a temporary file");
-                        free(t);
-                        save_free(s);
-                        return -1;
-                    }
-                }
-            }
+    /* in place: drop whatever is left of the old, longer contents */
+    if (rc == 0 && commit && s->inplace && s->old_size.QuadPart >= 0 && !SetEndOfFile(s->h)) {
+        set_win_err(s->dest, GetLastError());
+        rc = -1;
+    }
+    if (rc == 0 && commit && !FlushFileBuffers(s->h)) {
+        DWORD e = GetLastError();
+        if (GetFileType(s->h) == FILE_TYPE_DISK) { /* devices such as NUL cannot be flushed */
+            set_win_err(s->dest, e);
+            rc = -1;
         }
-        if (rc != 0 || !commit) DeleteFileW(s->wtmp);
+    }
+    if (s->inplace && !commit && !s->written && !s->created && s->old_size.QuadPart >= 0) {
+        /* nothing written: undo the space reservation */
+        if (SetFilePointerEx(s->h, s->old_size, NULL, FILE_BEGIN)) SetEndOfFile(s->h);
+    }
+    CloseHandle(s->h);
+    if (s->inplace && !commit && s->created) DeleteFileW(s->wdest); /* did not exist before */
+    if (s->wtmp) {
+        if (rc == 0 && commit) rc = swap_in(s);
+        else DeleteFileW(s->wtmp);
     }
     save_free(s);
     return commit ? rc : 0;
 }
 
 FILE *plat_temp_file(const char *tag, char **path) {
-    wchar_t dir[MAX_PATH + 2], name[MAX_PATH + 16];
-    DWORD n = GetTempPathW(MAX_PATH + 1, dir);
+    wchar_t name[MAX_PATH + 16];
+    char *dir = plat_temp_dir(); /* creates a missing %TEMP% */
+    wchar_t *wdir = dir ? to_w(dir) : NULL;
     FILE *f;
     (void)tag;
     *path = NULL;
-    if (n == 0 || n > MAX_PATH - 14) return NULL;
-    if (GetTempFileNameW(dir, L"mic", 0, name) == 0) return NULL; /* creates it */
+    free(dir);
+    /* GetTempFileNameW creates the file; it needs an existing directory
+       of at most MAX_PATH-14 characters */
+    if (!wdir || wcslen(wdir) > MAX_PATH - 14 || GetTempFileNameW(wdir, L"mic", 0, name) == 0) {
+        if (GetTempFileNameW(L".", L"mic", 0, name) == 0) {
+            free(wdir);
+            return NULL;
+        }
+    }
+    free(wdir);
     f = _wfopen(name, L"w+b");
     if (!f) { DeleteFileW(name); return NULL; }
     *path = from_w(name);
@@ -861,7 +1053,47 @@ int plat_run(const char *const *argv, const char *in_path) {
 }
 
 int plat_mkdir_private(const char *path) { return plat_mkdir_p(path); }
-int plat_owns_file(const char *path) { return plat_exists(path) && !plat_is_dir(path); }
+
+/* the SID in a token's TokenUser or TokenOwner (malloc'd) */
+static void *token_sid(HANDLE tok, TOKEN_INFORMATION_CLASS cls) {
+    DWORD n = 0;
+    void *buf;
+    GetTokenInformation(tok, cls, NULL, 0, &n);
+    if (n == 0 || !(buf = malloc(n))) return NULL;
+    if (!GetTokenInformation(tok, cls, buf, n, &n)) { free(buf); return NULL; }
+    return buf;
+}
+
+/* a regular file (not a link, directory or device) owned by this user, or
+   by the owner it gives new files (Administrators when elevated) */
+int plat_owns_file(const char *path) {
+    DWORD a = attrs(path);
+    wchar_t *wp;
+    PSID owner = NULL;
+    PSECURITY_DESCRIPTOR sd = NULL;
+    HANDLE tok;
+    int ok = 0;
+    if (a == INVALID_FILE_ATTRIBUTES ||
+        (a & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DEVICE)))
+        return 0;
+    wp = to_w(path);
+    if (!wp) return 0;
+    if (GetNamedSecurityInfoW(wp, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, &owner, NULL, NULL, NULL, &sd) !=
+            ERROR_SUCCESS ||
+        !owner) {
+        ok = 1; /* a file system without owners (FAT) */
+    } else if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) {
+        TOKEN_USER *u = token_sid(tok, TokenUser);
+        TOKEN_OWNER *o = token_sid(tok, TokenOwner);
+        ok = (u && EqualSid(owner, u->User.Sid)) || (o && EqualSid(owner, o->Owner));
+        free(u);
+        free(o);
+        CloseHandle(tok);
+    }
+    if (sd) LocalFree(sd);
+    free(wp);
+    return ok;
+}
 int plat_take_signal(void) { return 0; }
 
 #endif /* _WIN32 */
