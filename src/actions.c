@@ -414,8 +414,8 @@ static Regex *get_search_re(Buffer *b, const char *pat, int regex, char **err) {
                (U+212A KELVIN SIGN, U+017F LATIN SMALL LETTER LONG S) */
             else if (c == 'k' || c == 'K' || c == 's' || c == 'S') ascii_fold = 0;
         }
-        /* the regex reads an invalid byte as U+FFFD, which then matches
-           any invalid byte or a real U+FFFD: memcmp can't do that */
+        /* a real U+FFFD in the pattern also matches invalid bytes in the
+           text, which memcmp can't do */
         for (u = pat; *u; u += n) {
             n = utf8_decode(u, plen - (int)(u - pat), &cp);
             if (cp == 0xFFFD) { exact = 0; break; }

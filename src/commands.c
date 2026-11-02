@@ -518,6 +518,14 @@ static int replace_all(Pane *p, const char *search, const char *repl, int litera
                 char *pp = xsprintf("(?:%s)((?s:.))", q ? q : search);
                 pad = re_compile(pp, BOPT(b, O_IGNORECASE) ? RE_ICASE : 0, NULL);
                 free(pp);
+                if (!pad || re_ncaps(pad) != ncap + 1) {
+                    /* a dangling \Q in the search swallows the padding:
+                       close it and try once more */
+                    re_free(pad);
+                    pp = xsprintf("(?:%s\\E)((?s:.))", q ? q : search);
+                    pad = re_compile(pp, BOPT(b, O_IGNORECASE) ? RE_ICASE : 0, NULL);
+                    free(pp);
+                }
                 free(q);
             }
             if (pad && re_ncaps(pad) == ncap + 1) {

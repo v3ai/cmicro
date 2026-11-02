@@ -457,7 +457,7 @@ def replaceall_selection(t, env):
     assert got == b"abb\nbaa\naaa\n", got
 
 
-@with_env(files={"a.txt": "foobar\nfoobar\nfooo\nfoo.bar\nfoo\nfoobar\nfoobar\na.b.c\na\u00e9\na\u00e9\n"})
+@with_env(files={"a.txt": "foobar\nfoobar\nfooo\nfoo.bar\nfoo\nfoobar\nfoobar\na.b.c\na\u00e9\na\u00e9\nfoobar\n"})
 @with_args("a.txt")
 def replaceall_selection_edges(t, env):
     """like micro, the range end sees the next character ($ and \\b don't
@@ -467,7 +467,7 @@ def replaceall_selection_edges(t, env):
         (1, 0, 3, "'o$' X"), (2, 0, 3, "'o\\b' X"), (3, 0, 3, "'o+' X"),
         (4, 0, 3, "'o\\b' X"), (5, 0, 3, "'o$' X"), (6, 3, 3, "'^b' X"),
         (7, 3, 3, "'\\bb' X"), (8, 0, 3, "-l . X"), (9, 0, 1, "'a$' X"),
-        (10, 0, 1, "a X"),
+        (10, 0, 1, "a X"), (11, 0, 3, "'o$\\Q' X"),
     ]
     for line, x, n, args in cases:
         cmd(t, "goto %d" % line)
@@ -476,7 +476,7 @@ def replaceall_selection_edges(t, env):
         cmd(t, "replaceall " + args)
     got = save_and_read(t, env, "a.txt")
     assert got == (b"foobar\nfoobar\nfXo\nfoX.bar\nfoX\nfoobar\nfoobar\naXb.c\n"
-                   b"a\xc3\xa9\nX\xc3\xa9\n"), got
+                   b"a\xc3\xa9\nX\xc3\xa9\nfoobar\n"), got
 
 
 @with_env(files={"a.txt": "a1\na2\na3\n"})
