@@ -31,7 +31,9 @@
 #define MAX_PROG   1000000   /* instructions per compiled program */
 #define MAX_CP     0x10FFFF
 #define DFA_BUDGET ((size_t)1 << 20)            /* bytes of cached states per DFA */
+#ifndef PIKE_BUDGET /* overridable to test the windowed Pike VM */
 #define PIKE_BUDGET ((size_t)64 << 20)          /* bytes of Pike VM thread state */
+#endif
 #define LIT_SHORT  32        /* longer literals are searched with KMP */
 
 /* parser flags (RE_ICASE is 1) */
@@ -1624,7 +1626,11 @@ static int dfa_backward(DFA *d, const unsigned char *s, int len, int start, int 
 
 /* ------------------------------------------------------------------ */
 /* Pike VM: submatches of the leftmost-first match that is known to span
-   [L, e).  Threads are kept in priority order; memory O(prog * ncap). */
+   [L, e).  Threads are kept in priority order; memory O(prog * nslot).
+   Only slots [base, base + nslot) are tracked.  Which thread survives
+   depends only on priority order and the per-step marks, never on the
+   capture contents, so passes over different slot windows follow the
+   same winning thread and their results combine exactly. */
 
 typedef struct {
     int *pc, *caps, n;
@@ -1637,7 +1643,7 @@ typedef struct {
 #define PUSH_PC(v) (stk[sp].pc = (v), stk[sp].slot = -1, stk[sp].val = 0, sp++)
 
 static void pike_add(const Regex *re, Threads *t, unsigned *mark, unsigned g, PikeJob *stk, int pc0,
-                     int *cur, int nslot, unsigned f, int pos) {
+                     int *cur, int base, int nslot, unsigned f, int pos) {
     int sp = 0;
     PUSH_PC(pc0);
     while (sp > 0) {
@@ -1651,11 +1657,12 @@ static void pike_add(const Regex *re, Threads *t, unsigned *mark, unsigned g, Pi
         case I_SPLIT: PUSH_PC(in->y); PUSH_PC(in->x); break;
         case I_JMP: PUSH_PC(in->x); break;
         case I_SAVE:
-            if (in->x < nslot) {
+            if (in->x >= base && in->x - base < nslot) {
+                int k = in->x - base;
                 stk[sp].pc = 0;
-                stk[sp].slot = in->x;
-                stk[sp++].val = cur[in->x];
-                cur[in->x] = pos;
+                stk[sp].slot = k;
+                stk[sp++].val = cur[k];
+                cur[k] = pos;
             }
             PUSH_PC(j.pc + 1);
             break;
@@ -1672,14 +1679,15 @@ static void pike_add(const Regex *re, Threads *t, unsigned *mark, unsigned g, Pi
 }
 #undef PUSH_PC
 
-/* returns 0 if it would need too much memory */
-static int pike(const Regex *re, const unsigned char *s, int len, int L, int e, int *caps, int nslot) {
+/* Fills caps[0..nslot) with slots base..base+nslot-1; returns 0 if no
+   match spans [L, e) (cannot happen when the DFAs found it). */
+static int pike(const Regex *re, const unsigned char *s, int len, int L, int e, int *caps, int base,
+                int nslot) {
     size_t n = (size_t)re->fwd.n;
     Threads a, b, *cl = &a, *nl = &b;
     unsigned *mark, g = 0;
     PikeJob *stk;
     int *cur, pos = L, i, found = 0;
-    if ((size_t)nslot > PIKE_BUDGET / (2 * sizeof(int)) / n) return 0; /* no overflow */
     a.pc = xmalloc(sizeof(int) * n);
     b.pc = xmalloc(sizeof(int) * n);
     a.caps = xmalloc(sizeof(int) * n * (size_t)nslot);
@@ -1689,7 +1697,7 @@ static int pike(const Regex *re, const unsigned char *s, int len, int L, int e, 
     stk = xmalloc(sizeof *stk * (2 * n + 2));
     cur = xmalloc(sizeof(int) * (size_t)nslot);
     for (i = 0; i < nslot; i++) cur[i] = -1;
-    pike_add(re, cl, mark, ++g, stk, 0, cur, nslot, prev_flags(s, pos) | next_flags(s, len, pos), pos);
+    pike_add(re, cl, mark, ++g, stk, 0, cur, base, nslot, prev_flags(s, pos) | next_flags(s, len, pos), pos);
     while (cl->n > 0) {
         int cp = -1, w = 0;
         Threads *tmp;
@@ -1709,7 +1717,7 @@ static int pike(const Regex *re, const unsigned char *s, int len, int L, int e, 
             }
             if (pos < e && inst_match(re, in, cp)) {
                 memcpy(cur, tc, sizeof(int) * (size_t)nslot);
-                pike_add(re, nl, mark, g, stk, cl->pc[i] + 1, cur, nslot,
+                pike_add(re, nl, mark, g, stk, cl->pc[i] + 1, cur, base, nslot,
                          prev_flags(s, pos + w) | next_flags(s, len, pos + w), pos + w);
             }
         }
@@ -1772,7 +1780,11 @@ static void analyze(Regex *re) {
     re->wordstart = !start_closure(re, 2, F_PW | F_NW, cons, &n) && n == 0;
     /* literal: SAVE 0, CHAR..., SAVE 1, MATCH */
     if (re->ncap == 1 && p->n >= 4) {
-        for (i = 1; i < p->n - 2 && p->ins[i].op == I_CHAR && p->ins[i].x != 0xFFFD; i++)
+        /* U+FFFD and surrogates never match their encoded bytes (which
+           read as invalid), so they go through the DFA instead */
+        for (i = 1; i < p->n - 2 && p->ins[i].op == I_CHAR && p->ins[i].x != 0xFFFD &&
+                    (p->ins[i].x < 0xD800 || p->ins[i].x > 0xDFFF);
+             i++)
             ;
         if (i == p->n - 2 && i > 1) {
             re->lit = xmalloc((size_t)(p->n - 3) * 4);
@@ -1840,6 +1852,19 @@ Regex *re_compile(const char *pattern, int flags, char **err) {
     ps.re = re;
     ps.ncap = 1;
     if (err) *err = NULL;
+    { /* like Go, refuse a pattern that is not valid UTF-8 (a real U+FFFD,
+         3 bytes long, is fine) */
+        const unsigned char *u = (const unsigned char *)pattern;
+        int i = 0, n = (int)strlen(pattern), cp, w;
+        for (; i < n; i += w) {
+            w = dec(u + i, n - i, &cp);
+            if (cp == 0xFFFD && w == 1) {
+                if (err) *err = xsprintf("invalid UTF-8 at offset %d", i);
+                re_free(re);
+                return NULL;
+            }
+        }
+    }
     if (flags & RE_LITERAL) {
         root = new_node(N_CAT);
         while (*ps.p) add_kid(root, lit_node(&ps, pat_rune(&ps), f));
@@ -1946,8 +1971,14 @@ int re_search(const Regex *re, const char *str, int len, int start, int *caps, i
     caps[1] = e;
     for (i = 2; i < 2 * ncap; i++) caps[i] = -1;
     nslot = 2 * (ncap < re->ncap ? ncap : re->ncap);
-    if (nslot > 2 && !pike(re, s, len, L, e, caps, nslot)) {
-        caps[0] = L; /* too big to track groups: report the whole match only */
+    if (nslot > 2) {
+        /* thread state is 2 * prog * window ints; keep it within
+           PIKE_BUDGET by tracking the slots in windows, one pass each */
+        size_t lim = PIKE_BUDGET / (2 * sizeof(int)) / (size_t)re->fwd.n;
+        int win = lim < 2 ? 2 : lim >= (size_t)nslot ? nslot : (int)(lim & ~(size_t)1), b;
+        for (b = 0; b < nslot; b += win)
+            if (!pike(re, s, len, L, e, caps + b, b, nslot - b < win ? nslot - b : win)) break;
+        caps[0] = L;
         caps[1] = e;
     }
     return 1;
