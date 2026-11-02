@@ -321,14 +321,15 @@ static void test_save_paths(void) {
     chmod(p, 0644);
 
 #ifdef __linux__
-    /* extended attributes (ACLs, SELinux labels...) survive: in place */
+    /* extended attributes (ACLs, SELinux labels...) survive: they are
+       copied onto the temporary file, which still replaces the file */
     write_raw(p, "original\n", 9);
     if (setxattr(p, "user.micro_test", "v", 1, 0) == 0) {
         char v[8];
         ino = file_ino(p);
         CHECK(buf_save(b, p, &err) == 0);
         CHECK(read_is(p, "new\n"));
-        CHECK(file_ino(p) == ino);
+        CHECK(file_ino(p) != ino);
         CHECK(getxattr(p, "user.micro_test", v, sizeof v) == 1 && v[0] == 'v');
     } else {
         fprintf(stderr, "  xattr test skipped: %s\n", strerror(errno));
