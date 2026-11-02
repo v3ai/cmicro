@@ -578,54 +578,70 @@ void cnode_del(CNode *map, const char *key) {
     }
 }
 
-static void jw_str(FILE *f, const char *s) {
-    fputc('"', f);
+static void jw_str(Str *o, const char *s) {
+    str_putc(o, '"');
     for (; s && *s; s++) {
-        if (*s == '"' || *s == '\\') { fputc('\\', f); fputc(*s, f); }
-        else if (*s == '\n') fputs("\\n", f);
-        else if (*s == '\t') fputs("\\t", f);
-        else if ((unsigned char)*s < 32) fprintf(f, "\\u%04x", (unsigned)(unsigned char)*s);
-        else fputc(*s, f);
+        if (*s == '"' || *s == '\\') { str_putc(o, '\\'); str_putc(o, *s); }
+        else if (*s == '\n') str_putn(o, "\\n", 2);
+        else if (*s == '\t') str_putn(o, "\\t", 2);
+        else if ((unsigned char)*s < 32) str_printf(o, "\\u%04x", (unsigned)(unsigned char)*s);
+        else str_putc(o, *s);
     }
-    fputc('"', f);
+    str_putc(o, '"');
 }
 
-static void jw(FILE *f, const CNode *n, int ind) {
+static void jw_indent(Str *o, int n) {
+    while (n-- > 0) str_putc(o, ' ');
+}
+
+static void jw(Str *o, const CNode *n, int ind) {
     int i;
-    if (!n) { fputs("null", f); return; }
+    if (!n) { str_putn(o, "null", 4); return; }
     switch (n->type) {
     case CN_MAP:
-        fputs("{\n", f);
+        str_putn(o, "{\n", 2);
         for (i = 0; i < n->n; i++) {
-            fprintf(f, "%*s", ind + 4, "");
-            jw_str(f, n->keys ? n->keys[i] : "");
-            fputs(": ", f);
-            jw(f, n->vals[i], ind + 4);
-            fputs(i + 1 < n->n ? ",\n" : "\n", f);
+            jw_indent(o, ind + 4);
+            jw_str(o, n->keys ? n->keys[i] : "");
+            str_putn(o, ": ", 2);
+            jw(o, n->vals[i], ind + 4);
+            str_putn(o, i + 1 < n->n ? ",\n" : "\n", i + 1 < n->n ? 2 : 1);
         }
-        fprintf(f, "%*s}", ind, "");
+        jw_indent(o, ind);
+        str_putc(o, '}');
         break;
     case CN_LIST:
-        fputc('[', f);
+        str_putc(o, '[');
         for (i = 0; i < n->n; i++) {
-            if (i) fputs(", ", f);
-            jw(f, n->vals[i], ind);
+            if (i) str_putn(o, ", ", 2);
+            jw(o, n->vals[i], ind);
         }
-        fputc(']', f);
+        str_putc(o, ']');
         break;
-    case CN_STR: jw_str(f, n->str); break;
-    case CN_NUM: fputs(n->str && *n->str ? n->str : "0", f); break;
-    case CN_BOOL: fputs(n->b ? "true" : "false", f); break;
-    default: fputs("null", f);
+    case CN_STR: jw_str(o, n->str); break;
+    case CN_NUM: {
+        const char *v = n->str && *n->str ? n->str : "0";
+        str_putn(o, v, (int)strlen(v));
+        break;
+    }
+    case CN_BOOL: str_putn(o, n->b ? "true" : "false", n->b ? 4 : 5); break;
+    default: str_putn(o, "null", 4);
     }
 }
 
+/* Written atomically (temp file + rename, see plat_save_open), so a
+   crash or full disk never leaves a truncated bindings.json behind. */
 int json_write_file(const char *path, const CNode *n) {
-    FILE *f = plat_fopen(path, "w");
-    int bad;
-    if (!f) return -1;
-    jw(f, n, 0);
-    fputc('\n', f);
-    bad = ferror(f);
-    return fclose(f) == 0 && !bad ? 0 : -1;
+    Str o;
+    PlatSave *f;
+    int denied = 0, rc;
+    str_init(&o);
+    jw(&o, n, 0);
+    str_putc(&o, '\n');
+    f = plat_save_open(path, (long long)o.len, 0, &denied);
+    if (!f) { str_free(&o); return -1; }
+    rc = plat_save_write(f, o.s, (size_t)o.len);
+    rc = plat_save_close(f, rc == 0) == 0 && rc == 0 ? 0 : -1;
+    str_free(&o);
+    return rc;
 }

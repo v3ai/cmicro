@@ -196,8 +196,18 @@ static int save_binding(const char *keyname, const char *action) {
     if (!path) return -1;
     text = read_file(path, NULL);
     if (text) {
-        root = json_parse(text, NULL);
+        char *err = NULL;
+        root = json_parse(text, &err);
         free(text);
+        if (err) {
+            /* writing back the partly parsed tree would drop the rest of
+               the user's bindings: leave the file alone */
+            editor_set_error("Not saving the binding: bindings.json has an error: %s", err);
+            free(err);
+            cnode_free(root);
+            free(path);
+            return -1;
+        }
     }
     if (!root || root->type != CN_MAP) {
         cnode_free(root);
