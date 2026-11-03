@@ -4,6 +4,7 @@
 #include <ctype.h>
 #include <limits.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -123,8 +124,12 @@ void str_insert(Str *s, int at, const char *p, int n) {
     if (n > INT_MAX - 1 - s->len) oom();
     if (at < 0) at = 0;
     if (at > s->len) at = s->len;
-    /* p may point into s itself, which the realloc/memmove would clobber */
-    if (s->s && p >= s->s && p < s->s + s->cap) p = tmp = xstrndup(p, (size_t)n);
+    /* p may point into s itself, which the realloc/memmove would clobber.
+       Relational comparison of pointers into different objects is undefined
+       behaviour (C99 6.5.8p5), and p usually points into another object,
+       so compare the addresses as integers instead. */
+    if (s->s && (uintptr_t)p - (uintptr_t)s->s < (uintptr_t)s->cap)
+        p = tmp = xstrndup(p, (size_t)n);
     str_reserve(s, s->len + n);
     memmove(s->s + at + n, s->s + at, (size_t)(s->len - at));
     memcpy(s->s + at, p, (size_t)n);
@@ -178,10 +183,12 @@ int utf8_decode(const char *str, int len, int *cp) {
     return 1;
 }
 
-/* Writes at most 4 bytes.  Values outside 0..0x10FFFF (e.g. from a
-   \U escape) are written as U+FFFD. */
+/* Writes at most 4 bytes.  Values that are not Unicode scalar values
+   (outside 0..0x10FFFF, e.g. from a \U escape, or a surrogate
+   U+D800..U+DFFF, e.g. from a lone \uD800 escape) are written as U+FFFD,
+   like Go's utf8.EncodeRune, so the output is always valid UTF-8. */
 int utf8_encode(int cp, char *out) {
-    if (cp < 0 || cp > 0x10FFFF) cp = 0xFFFD;
+    if (cp < 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) cp = 0xFFFD;
     if (cp < 0x80) { out[0] = (char)cp; return 1; }
     if (cp < 0x800) {
         out[0] = (char)(0xC0 | (cp >> 6));
