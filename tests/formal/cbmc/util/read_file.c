@@ -14,10 +14,17 @@
  *     clearerr clears the flag.
  * Allocations may fail (exit path in xrealloc).
  *
- * Because no byte loop runs over the data, this is complete for every file
- * length: the read loop runs at most ~33 times (the buffer roughly doubles
- * each round until INT_MAX - 2) and str_reserve's loop at most 32 times;
- * unwinding assertions prove both bounds.
+ * No byte loop runs over the data (fread is a model), so the cost is in
+ * the number of read rounds (the buffer roughly doubles each round) and
+ * str_reserve's doubling loop (<= 32); unwinding assertions prove both.
+ *
+ * run.sh runs two configurations:
+ *   read_file        files of up to CBMC_FILE_MAX = 64 KiB, ANY size hint
+ *                    (read loop <= 18 rounds);
+ *   read_file_large  files of ANY length (up to LONG_MAX), seekable, size
+ *                    hints >= 2^29 (CBMC_LARGE_HINT; the loop then runs
+ *                    <= 4 rounds), which reaches the INT_MAX - 2 limit
+ *                    paths.
  *
  * Checks: every UB/memory check, fread never writes outside the buffer,
  * the result is NULL or a heap string NUL-terminated at index *len with
@@ -49,7 +56,9 @@ FILE *plat_fopen(const char *path, const char *mode) {
 int fseek(FILE *f, long off, int whence) {
     __CPROVER_assert(f == (FILE *)(void *)&the_file && file_open, "fseek on the open file");
     (void)whence;
+#ifndef CBMC_LARGE_HINT /* read_file_large: seekable files only */
     if (nondet_int()) return -1;
+#endif
     file_pos = off; /* only (0, SEEK_END) and (0, SEEK_SET) are used */
     return 0;
 }
@@ -58,6 +67,11 @@ long ftell(FILE *f) {
     long r = nondet_long();
     __CPROVER_assert(f == (FILE *)(void *)&the_file && file_open, "ftell on the open file");
     __CPROVER_assume(r >= -1);
+#ifdef CBMC_LARGE_HINT
+    /* read_file_large: a size hint of at least 2^29 (so the read loop
+       runs only a few rounds even for files of any length) */
+    __CPROVER_assume(r >= (1L << 29));
+#endif
     return r;
 }
 
