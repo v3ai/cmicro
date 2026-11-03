@@ -231,6 +231,9 @@ proof path "path_last_sep path_base path_dir path_join expand_home" \
 proof read_file "read_file" \
     $D/read_file.c $U $S -I src --function harness -DCBMC_FILE_MAX=65536 \
     --unwindset read_file.0:18,str_reserve.0:33 --unwind 2 $MAYFAIL
+proof read_file_large "read_file" \
+    $D/read_file.c $U $S -I src --function harness -DCBMC_LARGE_HINT \
+    --unwindset read_file.0:6,str_reserve.0:33 --unwind 2 $MAYFAIL
 # glob_match: one run per pair of exact lengths (see glob_match.c).
 GM_MAX=${GM_MAX:-4}
 for P in $(seq 0 $GM_MAX); do
