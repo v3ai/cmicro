@@ -213,7 +213,14 @@ Syntax *syntax_detect(const char *path, const char *firstline, const char **line
  * understood get no filter.  Skipped positions are only ASCII bytes, which
  * are always character boundaries, so the leftmost match is unchanged. */
 
+/* a cached pattern search for the current line (see pat_search) */
+typedef struct {
+    unsigned long long gen; /* valid only when equal to pgen */
+    int end, from, found, s, e;
+} PatCache;
+
 struct ReFilter {
+    PatCache pc[2];  /* per-regex search cache: two `end`s, no collisions */
     int active;      /* the fields below are valid and worth checking */
     int cf;          /* cached re_context_free() */
     Regex *anch;     /* region start/end/skip that isn't context-free: \A(?:re),
@@ -962,44 +969,37 @@ static void fill(unsigned short *hl, int a, int b, int g) {
 /* Per-line cache of pattern searches (same idea as StartCache): a
    context-free regex searched over line[..end) gives the same leftmost
    match at or after an absolute position, whatever the substring start. */
-typedef struct {
-    Regex *re;
-    int end, from, found, s, e;
-} PatCache;
+static unsigned long long pgen = 1; /* PatCache entries are valid only for this line */
 
-static PatCache pcache[128];
-static int npcache;
-
-static int pat_search(Regex *re, const ReFilter *flt, const char *line, int off, int end, int pos, int *ms, int *me) {
-    int i, caps[2], found, apos = off + pos;
-    int cf = !syntax_nocache && context_free(re, flt);
-    if (cf) {
-        for (i = 0; i < npcache; i++) {
-            PatCache *c = &pcache[i];
-            if (c->re == re && c->end == end && c->from <= apos) {
-                if (!c->found) return 0;
-                if (c->s >= apos) {
-                    *ms = c->s - off;
-                    *me = c->e - off;
-                    return 1;
-                }
-                break;
+static int pat_search(Regex *re, ReFilter *flt, const char *line, int off, int end, int pos, int *ms, int *me) {
+    int caps[2], found, apos = off + pos;
+    PatCache *c = NULL;
+    if (flt && !syntax_nocache && context_free(re, flt)) {
+        PatCache *a = &flt->pc[0], *b = &flt->pc[1];
+        if (a->gen == pgen && a->end == end) c = a;
+        else if (b->gen == pgen && b->end == end) c = b;
+        if (c && c->from <= apos) {
+            if (!c->found) return 0;
+            if (c->s >= apos) {
+                *ms = c->s - off;
+                *me = c->e - off;
+                return 1;
             }
         }
-    } else {
-        i = 128;
+        if (!c) {
+            /* replace an entry from an earlier line, else the older one */
+            c = a->gen != pgen ? a : b->gen != pgen ? b : a;
+            if (c == a && a->gen == pgen) { *b = *a; } /* keep the newer pair in order */
+        }
     }
     found = search(re, flt, line + off, end - off, pos, caps);
-    if (cf) {
-        if (i == npcache && npcache < 128) npcache++;
-        if (i < 128) {
-            pcache[i].re = re;
-            pcache[i].end = end;
-            pcache[i].from = apos;
-            pcache[i].found = found;
-            pcache[i].s = found ? caps[0] + off : 0;
-            pcache[i].e = found ? caps[1] + off : 0;
-        }
+    if (c) {
+        c->gen = pgen;
+        c->end = end;
+        c->from = apos;
+        c->found = found;
+        c->s = found ? caps[0] + off : 0;
+        c->e = found ? caps[1] + off : 0;
     }
     if (found) { *ms = caps[0]; *me = caps[1]; }
     return found;
@@ -1036,7 +1036,7 @@ Region *syntax_highlight_line(Syntax *syn, Region *cur, const char *line, int le
     long iter = 0;
     nscache = 0;
     nskm = 0;
-    npcache = 0;
+    pgen++; /* 64 bits: never wraps in practice */
     if (!syn) {
         if (hl) fill(hl, 0, len, 0);
         return NULL;
