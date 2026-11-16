@@ -115,6 +115,47 @@ How it differs from the Unix build:
 - Truecolor is used automatically in Windows Terminal; elsewhere colors are
   mapped to the 256-color palette (`set truecolor on` to force it).
 
+## Zero-dependency build (Linux x86-64)
+
+`make nolibc` builds `micro-nolibc`, a version of the editor that uses no
+C library at all: no glibc or musl, no `crt1.o` startup code and no
+`libgcc`. The C compiler only compiles (`-ffreestanding -nostdinc`), and
+`ld` links the objects directly. The result is a static ELF binary about
+640 KB in size, with no dynamic section and no undefined symbols, that
+talks to the kernel only through the `syscall` instruction.
+
+```
+make nolibc          # gcc by default; also builds with: make nolibc CC=clang
+./micro-nolibc file.txt
+```
+
+`nolibc/` supplies the part of the C library the editor uses, written from
+scratch:
+
+| file | contents |
+|------|----------|
+| `nolibc/start.S` | `_start` (reads argc/argv/envp from the initial stack) and the signal-return trampoline |
+| `nolibc/include/linux_sys.h` | inline-asm `syscall` wrappers, syscall numbers and kernel struct layouts |
+| `nolibc/include/*.h` | the standard headers the editor includes |
+| `nolibc/string.c` | `mem*`, `str*`, `ctype` |
+| `nolibc/stdlib.c` | size-class allocator on `mmap` (large blocks grow with `mremap`), `exit`/`atexit`, `getenv`, `qsort`, `strtol`, correctly rounded `strtod`, `system()` (fork + execve `/bin/sh` + wait4) |
+| `nolibc/stdio.c` | buffered `FILE` streams, the `printf` family (exact float formatting) and a small `sscanf` |
+| `nolibc/bignum.c` | big-integer arithmetic for exact binary/decimal float conversion |
+| `nolibc/time.c` | `time`, `gmtime`, `localtime` (reads TZif zone files, including their POSIX-rule footers, and POSIX `TZ` strings), `strftime` |
+| `src/platform_nolibc.c` | the editor's platform layer: raw mode via `TCGETS`/`TCSETSF`, `TIOCGWINSZ`, `SIGWINCH` via `rt_sigaction`, `poll`, `getdents64`, `newfstatat`, `/proc/self/fd` for canonical paths |
+
+`tests/nolibc/run.sh` builds a set of test programs twice, once against the
+host C library and once against `nolibc`, and requires identical output:
+`printf` with every float conversion (including 40,000 random doubles),
+`strtod` on exact halfway cases between adjacent doubles, `strtol`
+overflow, an allocator stress test that checks block contents, and
+`localtime` under 13 `TZ` settings (zone files and POSIX rule strings). The editor's
+terminal test scripts give the same screens with `micro-nolibc` as with
+the normal build, and both builds edit a 25 MB file at the same speed.
+
+Not supported in this build: the system clipboard (micro's internal
+clipboard is used) and locales (the editor never used them).
+
 ## "Only the C standard library"
 
 Everything is written against the ISO C standard library, with one
@@ -194,6 +235,8 @@ message.
 ```
 src/platform.c   POSIX terminal/filesystem glue
 src/platform_win32.c  Windows console/filesystem glue
+src/platform_nolibc.c raw-syscall glue for the zero-dependency build
+nolibc/          freestanding C library for the zero-dependency build
 src/main.c       command line, startup, main loop
 src/editor.c     editor state, tabs, event dispatch, frame rendering
 src/actions.c    every bindable action, typing, clipboard, search, macros

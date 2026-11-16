@@ -2,7 +2,7 @@
  * platform.c - POSIX glue (Linux, macOS, BSDs, WSL, Cygwin).  See
  * platform.h; the native Windows version is platform_win32.c.
  */
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(MICRO_NOLIBC)
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
 #include "platform.h"
@@ -286,7 +286,7 @@ char *plat_read_stdin(long *len) {
     return buf;
 }
 
-#endif /* !_WIN32 */
+#endif /* !_WIN32 && !MICRO_NOLIBC */
 
 /* ISO C forbids an empty translation unit */
 typedef int platform_posix_unused;

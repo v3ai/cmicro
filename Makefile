@@ -2,6 +2,7 @@
 #
 #   make                      Linux, macOS, BSDs (or MSYS2/MinGW on Windows)
 #   make windows              cross-compile micro.exe with MinGW-w64
+#   make nolibc               Linux x86-64 binary with no C library at all
 #
 # Without make, this also works on any platform:  cc -O2 -o micro src/*.c
 CC      ?= gcc
@@ -14,7 +15,7 @@ SRCS = src/main.c src/editor.c src/actions.c src/bindings.c src/commands.c \
        src/prompt.c src/render.c src/tabs.c src/pane.c src/buffer.c \
        src/options.c src/screen.c src/input.c src/syntax.c src/colors.c \
        src/backup.c src/runtime.c src/runtime_data.c src/conf.c src/regex.c src/util.c \
-       src/platform.c src/platform_win32.c
+       src/platform.c src/platform_win32.c src/platform_nolibc.c
 OBJS = $(SRCS:.c=.o)
 
 ifeq ($(OS),Windows_NT)
@@ -23,6 +24,31 @@ endif
 
 micro$(EXE): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDFLAGS)
+
+# Zero-dependency Linux x86-64 build: no C library, no libgcc, no startup
+# files.  nolibc/ provides the C library functions the editor uses, on raw
+# system calls; the result is linked with ld directly.
+NOLIBC_CFLAGS = -std=c99 -O2 -Wall -Wextra -pedantic -DMICRO_NOLIBC \
+        -ffreestanding -nostdinc -Inolibc/include -fno-stack-protector -fno-pie \
+        -fno-strict-aliasing -fno-tree-loop-distribute-patterns \
+        -fno-asynchronous-unwind-tables -ffunction-sections -fdata-sections
+NOLIBC_SRCS = $(SRCS) nolibc/bignum.c nolibc/string.c nolibc/stdlib.c nolibc/stdio.c nolibc/time.c
+NOLIBC_OBJS = $(patsubst %.c,build-nolibc/%.o,$(NOLIBC_SRCS)) build-nolibc/nolibc/start.o
+LD ?= ld
+
+nolibc: micro-nolibc
+nolibc-test:
+	CC=$(CC) tests/nolibc/run.sh
+micro-nolibc: $(NOLIBC_OBJS)
+	$(LD) -static -nostdlib --gc-sections -o $@ $(NOLIBC_OBJS)
+
+build-nolibc/%.o: %.c src/*.h nolibc/include/*.h nolibc/*.h
+	@mkdir -p $(dir $@)
+	$(CC) $(NOLIBC_CFLAGS) -c -o $@ $<
+
+build-nolibc/nolibc/start.o: nolibc/start.S
+	@mkdir -p $(dir $@)
+	$(CC) -c -o $@ $<
 
 # Cross-compile a native Windows build (needs x86_64-w64-mingw32-gcc)
 MINGW ?= x86_64-w64-mingw32-gcc
@@ -48,6 +74,7 @@ install: micro
 	install -m 755 micro $(DESTDIR)$(PREFIX)/bin/micro
 
 clean:
-	rm -f micro micro.exe $(OBJS) tests/syntax_regex_test
+	rm -f micro micro.exe micro-nolibc $(OBJS) tests/syntax_regex_test
+	rm -rf build-nolibc
 
-.PHONY: runtime test install clean windows
+.PHONY: runtime test install clean windows nolibc nolibc-test
