@@ -1,6 +1,6 @@
 #!/bin/sh
 # Universal C conformance checks for cmicro (see UNIVERSAL_C.md, section 13,
-# at https://github.com/v3ai/universal-c).  Run with `make check`.
+# at https://github.com/v3ai/universal-c).  Run with `./build.sh check`.
 #
 #  1. Every file compiles with gcc and clang under -std=c89, c99, c11, c17
 #     and c2x with -pedantic-errors -Werror and the strict warning set.

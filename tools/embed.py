@@ -2,7 +2,7 @@
 """Generate src/runtime_data.c from runtime/{syntax,colorschemes,help}.
 
 The generated file is checked in, so building the editor needs only a C
-compiler.  Run `make runtime` (or this script) after changing runtime files.
+compiler.  Run `./build.sh runtime` (or this script) after changing runtime files.
 Data is emitted as byte arrays rather than string literals: C89 limits a
 string literal to 509 characters (Universal C rules, section 9).  C89 also
 only guarantees objects up to 32767 bytes, so larger files are rejected."""

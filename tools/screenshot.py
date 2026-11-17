@@ -4,7 +4,7 @@
 Runs ./micro in a pseudo-terminal, replays a few keystrokes, and draws the
 resulting screen (characters, 24-bit colors, attributes, cursor) with
 Pillow.  Needs: pip install pyte pillow.  Run from the repository root
-after `make`.
+after `./build.sh`.
 """
 import copy
 import os
