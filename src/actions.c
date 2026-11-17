@@ -31,7 +31,7 @@ static void ac_clear(void) {
     ac_pane = NULL;
 }
 
-int autocomplete_suggestions(Pane *p, char ***out, int *idx) {
+int cm_autocomplete_suggestions(Pane *p, char ***out, int *idx) {
     if (ac_pane != p || ac_n <= 1) return 0;
     *out = ac_sugg;
     *idx = ac_idx;
@@ -46,101 +46,101 @@ int autocomplete_suggestions(Pane *p, char ***out, int *idx) {
 
 static int readonly_check(Pane *p) {
     if (BOPT(BUF, O_READONLY)) {
-        editor_set_message("Warning: file is readonly");
+        cm_editor_set_message("Warning: file is readonly");
         return 1;
     }
     return 0;
 }
 
 static char *sel_text(Pane *p, Cursor *c, int *len) {
-    return buf_get_text(p->buf, c->sel[0], c->sel[1], len);
+    return cm_buf_get_text(p->buf, c->sel[0], c->sel[1], len);
 }
 
 static void delete_selection(Pane *p, Cursor *c) {
     Loc a = c->sel[0], z = c->sel[1];
-    buf_remove(p->buf, a, z);
+    cm_buf_remove(p->buf, a, z);
     c->loc = c->sel[0];
     c->sel[0] = c->sel[1] = c->orig[0] = c->orig[1] = c->loc;
 }
 
 static void select_to(Pane *p, Cursor *c, Loc l) {
     (void)p;
-    cur_set_sel_to(c, l);
+    cm_cur_set_sel_to(c, l);
 }
 
 static void begin_select(Cursor *c) {
-    if (!cur_has_sel(c)) {
+    if (!cm_cur_has_sel(c)) {
         c->orig[0] = c->orig[1] = c->loc;
     }
 }
 
-static int rune_under(Pane *p, Loc l) { return buf_char_at(p->buf, l); }
+static int rune_under(Pane *p, Loc l) { return cm_buf_char_at(p->buf, l); }
 
 static int is_ws(int cp) { return cp == ' ' || cp == '\t'; }
 
 /* micro's RuneUnder: '\n' past the end of the line */
 static int ru(Pane *p, Loc l) {
-    int r = buf_char_at(p->buf, l);
+    int r = cm_buf_char_at(p->buf, l);
     return r < 0 ? '\n' : r;
 }
 static int wsr(int r) { return r == ' ' || r == '\t' || r == '\n'; }
 static Loc next_char(Pane *p, Loc l) {
     const Line *ln = &p->buf->lines[l.y];
-    return loc_make(l.x < ln->len ? utf8_next(ln->s, ln->len, l.x) : l.x, l.y);
+    return cm_loc_make(l.x < ln->len ? cm_utf8_next(ln->s, ln->len, l.x) : l.x, l.y);
 }
 
 /* exact ports of micro's Cursor.WordRight / WordLeft */
 static void word_right(Pane *p, Cursor *c) {
     Buffer *b = p->buf;
     int len = b->lines[c->loc.y].len;
-    if (c->loc.x == len) { c->loc = buf_move_chars(b, c->loc, 1); return; }
+    if (c->loc.x == len) { c->loc = cm_buf_move_chars(b, c->loc, 1); return; }
     while (wsr(ru(p, c->loc))) {
         if (c->loc.x == b->lines[c->loc.y].len) return;
-        c->loc = buf_move_chars(b, c->loc, 1);
+        c->loc = cm_buf_move_chars(b, c->loc, 1);
     }
-    if (!is_word_char(ru(p, c->loc)) && !wsr(ru(p, c->loc)) && !is_word_char(ru(p, next_char(p, c->loc)))) {
-        while (!is_word_char(ru(p, c->loc)) && !wsr(ru(p, c->loc))) {
+    if (!cm_is_word_char(ru(p, c->loc)) && !wsr(ru(p, c->loc)) && !cm_is_word_char(ru(p, next_char(p, c->loc)))) {
+        while (!cm_is_word_char(ru(p, c->loc)) && !wsr(ru(p, c->loc))) {
             if (c->loc.x == b->lines[c->loc.y].len) return;
-            c->loc = buf_move_chars(b, c->loc, 1);
+            c->loc = cm_buf_move_chars(b, c->loc, 1);
         }
         return;
     }
-    c->loc = buf_move_chars(b, c->loc, 1);
-    while (is_word_char(ru(p, c->loc))) {
+    c->loc = cm_buf_move_chars(b, c->loc, 1);
+    while (cm_is_word_char(ru(p, c->loc))) {
         if (c->loc.x == b->lines[c->loc.y].len) return;
-        c->loc = buf_move_chars(b, c->loc, 1);
+        c->loc = cm_buf_move_chars(b, c->loc, 1);
     }
 }
 
 static int char_before(Pane *p, Loc l) {
     if (l.x == 0) return -1;
-    return rune_under(p, loc_make(utf8_prev(p->buf->lines[l.y].s, l.x), l.y));
+    return rune_under(p, cm_loc_make(cm_utf8_prev(p->buf->lines[l.y].s, l.x), l.y));
 }
 
 static void word_left(Pane *p, Cursor *c) {
     Buffer *b = p->buf;
-    if (c->loc.x == 0) { c->loc = buf_move_chars(b, c->loc, -1); return; }
-    c->loc = buf_move_chars(b, c->loc, -1);
+    if (c->loc.x == 0) { c->loc = cm_buf_move_chars(b, c->loc, -1); return; }
+    c->loc = cm_buf_move_chars(b, c->loc, -1);
     while (wsr(ru(p, c->loc))) {
         if (c->loc.x == 0) return;
-        c->loc = buf_move_chars(b, c->loc, -1);
+        c->loc = cm_buf_move_chars(b, c->loc, -1);
     }
-    if (!is_word_char(ru(p, c->loc)) && !wsr(ru(p, c->loc)) && c->loc.x > 0 &&
-        !is_word_char(char_before(p, c->loc) < 0 ? '\n' : char_before(p, c->loc))) {
-        while (!is_word_char(ru(p, c->loc)) && !wsr(ru(p, c->loc))) {
+    if (!cm_is_word_char(ru(p, c->loc)) && !wsr(ru(p, c->loc)) && c->loc.x > 0 &&
+        !cm_is_word_char(char_before(p, c->loc) < 0 ? '\n' : char_before(p, c->loc))) {
+        while (!cm_is_word_char(ru(p, c->loc)) && !wsr(ru(p, c->loc))) {
             if (c->loc.x == 0) return;
-            c->loc = buf_move_chars(b, c->loc, -1);
+            c->loc = cm_buf_move_chars(b, c->loc, -1);
         }
-        c->loc = buf_move_chars(b, c->loc, 1);
+        c->loc = cm_buf_move_chars(b, c->loc, 1);
         return;
     }
     if (c->loc.x == 0) return;
-    c->loc = buf_move_chars(b, c->loc, -1);
-    while (is_word_char(ru(p, c->loc))) {
+    c->loc = cm_buf_move_chars(b, c->loc, -1);
+    while (cm_is_word_char(ru(p, c->loc))) {
         if (c->loc.x == 0) return;
-        c->loc = buf_move_chars(b, c->loc, -1);
+        c->loc = cm_buf_move_chars(b, c->loc, -1);
     }
-    c->loc = buf_move_chars(b, c->loc, 1);
+    c->loc = cm_buf_move_chars(b, c->loc, 1);
 }
 
 static int is_upper(int cp) { return cp >= 'A' && cp <= 'Z'; }
@@ -150,53 +150,53 @@ static void subword_right(Pane *p, Cursor *c) {
     Buffer *b = p->buf;
     const Line *ln = &b->lines[c->loc.y];
     int cp;
-    if (c->loc.x >= ln->len) { c->loc = buf_move_chars(b, c->loc, 1); return; }
-    while ((cp = rune_under(p, c->loc)) >= 0 && (is_ws(cp) || cp == '_')) c->loc.x = utf8_next(ln->s, ln->len, c->loc.x);
+    if (c->loc.x >= ln->len) { c->loc = cm_buf_move_chars(b, c->loc, 1); return; }
+    while ((cp = rune_under(p, c->loc)) >= 0 && (is_ws(cp) || cp == '_')) c->loc.x = cm_utf8_next(ln->s, ln->len, c->loc.x);
     cp = rune_under(p, c->loc);
     if (cp < 0) return;
-    if (!is_word_char(cp)) {
-        while ((cp = rune_under(p, c->loc)) >= 0 && !is_word_char(cp) && !is_ws(cp)) c->loc.x = utf8_next(ln->s, ln->len, c->loc.x);
+    if (!cm_is_word_char(cp)) {
+        while ((cp = rune_under(p, c->loc)) >= 0 && !cm_is_word_char(cp) && !is_ws(cp)) c->loc.x = cm_utf8_next(ln->s, ln->len, c->loc.x);
         return;
     }
     if (is_upper(cp)) {
-        c->loc.x = utf8_next(ln->s, ln->len, c->loc.x);
+        c->loc.x = cm_utf8_next(ln->s, ln->len, c->loc.x);
         if (is_upper(rune_under(p, c->loc))) {
             while ((cp = rune_under(p, c->loc)) >= 0 && is_upper(cp)) {
-                Loc nx = loc_make(utf8_next(ln->s, ln->len, c->loc.x), c->loc.y);
+                Loc nx = cm_loc_make(cm_utf8_next(ln->s, ln->len, c->loc.x), c->loc.y);
                 if (is_lower_or_digit(rune_under(p, nx))) return;
                 c->loc = nx;
             }
             return;
         }
     }
-    while ((cp = rune_under(p, c->loc)) >= 0 && is_word_char(cp) && cp != '_' && !is_upper(cp))
-        c->loc.x = utf8_next(ln->s, ln->len, c->loc.x);
+    while ((cp = rune_under(p, c->loc)) >= 0 && cm_is_word_char(cp) && cp != '_' && !is_upper(cp))
+        c->loc.x = cm_utf8_next(ln->s, ln->len, c->loc.x);
 }
 
 static void subword_left(Pane *p, Cursor *c) {
     Buffer *b = p->buf;
     const Line *ln = &b->lines[c->loc.y];
     int cp;
-    if (c->loc.x == 0) { c->loc = buf_move_chars(b, c->loc, -1); return; }
-    while ((cp = char_before(p, c->loc)) >= 0 && (is_ws(cp) || cp == '_')) c->loc.x = utf8_prev(ln->s, c->loc.x);
+    if (c->loc.x == 0) { c->loc = cm_buf_move_chars(b, c->loc, -1); return; }
+    while ((cp = char_before(p, c->loc)) >= 0 && (is_ws(cp) || cp == '_')) c->loc.x = cm_utf8_prev(ln->s, c->loc.x);
     cp = char_before(p, c->loc);
     if (cp < 0) return;
-    if (!is_word_char(cp)) {
-        while ((cp = char_before(p, c->loc)) >= 0 && !is_word_char(cp) && !is_ws(cp)) c->loc.x = utf8_prev(ln->s, c->loc.x);
+    if (!cm_is_word_char(cp)) {
+        while ((cp = char_before(p, c->loc)) >= 0 && !cm_is_word_char(cp) && !is_ws(cp)) c->loc.x = cm_utf8_prev(ln->s, c->loc.x);
         return;
     }
     if (is_upper(cp)) {
-        while ((cp = char_before(p, c->loc)) >= 0 && is_upper(cp)) c->loc.x = utf8_prev(ln->s, c->loc.x);
+        while ((cp = char_before(p, c->loc)) >= 0 && is_upper(cp)) c->loc.x = cm_utf8_prev(ln->s, c->loc.x);
         return;
     }
-    while ((cp = char_before(p, c->loc)) >= 0 && is_word_char(cp) && cp != '_' && !is_upper(cp))
-        c->loc.x = utf8_prev(ln->s, c->loc.x);
-    if ((cp = char_before(p, c->loc)) >= 0 && is_upper(cp)) c->loc.x = utf8_prev(ln->s, c->loc.x);
+    while ((cp = char_before(p, c->loc)) >= 0 && cm_is_word_char(cp) && cp != '_' && !is_upper(cp))
+        c->loc.x = cm_utf8_prev(ln->s, c->loc.x);
+    if ((cp = char_before(p, c->loc)) >= 0 && is_upper(cp)) c->loc.x = cm_utf8_prev(ln->s, c->loc.x);
 }
 
 static int start_of_text_x(Pane *p, int y) {
     int len;
-    buf_leading_ws(p->buf, y, &len);
+    cm_buf_leading_ws(p->buf, y, &len);
     return len;
 }
 
@@ -206,23 +206,23 @@ static void select_word_at(Pane *p, Cursor *c) {
     int a = c->loc.x, z = c->loc.x, cp;
     if (ln->len == 0) return;
     cp = rune_under(p, c->loc);
-    if (cp < 0 || !is_word_char(cp)) {
+    if (cp < 0 || !cm_is_word_char(cp)) {
         int pc = char_before(p, c->loc);
-        if (pc >= 0 && is_word_char(pc)) { a = utf8_prev(ln->s, a); z = a; }
+        if (pc >= 0 && cm_is_word_char(pc)) { a = cm_utf8_prev(ln->s, a); z = a; }
         else {
             /* select single char */
             c->sel[0] = c->loc;
-            c->sel[1] = loc_make(utf8_next(ln->s, ln->len, c->loc.x), c->loc.y);
+            c->sel[1] = cm_loc_make(cm_utf8_next(ln->s, ln->len, c->loc.x), c->loc.y);
             c->orig[0] = c->sel[0];
             c->orig[1] = c->sel[1];
             c->loc = c->sel[1];
             return;
         }
     }
-    while (a > 0 && is_word_char(char_before(p, loc_make(a, c->loc.y)))) a = utf8_prev(ln->s, a);
-    while (z < ln->len && is_word_char(rune_under(p, loc_make(z, c->loc.y)))) z = utf8_next(ln->s, ln->len, z);
-    c->sel[0] = loc_make(a, c->loc.y);
-    c->sel[1] = loc_make(z, c->loc.y);
+    while (a > 0 && cm_is_word_char(char_before(p, cm_loc_make(a, c->loc.y)))) a = cm_utf8_prev(ln->s, a);
+    while (z < ln->len && cm_is_word_char(rune_under(p, cm_loc_make(z, c->loc.y)))) z = cm_utf8_next(ln->s, ln->len, z);
+    c->sel[0] = cm_loc_make(a, c->loc.y);
+    c->sel[1] = cm_loc_make(z, c->loc.y);
     c->orig[0] = c->sel[0];
     c->orig[1] = c->sel[1];
     c->loc = c->sel[1];
@@ -230,9 +230,9 @@ static void select_word_at(Pane *p, Cursor *c) {
 
 static void select_line_at(Pane *p, Cursor *c) {
     Buffer *b = p->buf;
-    c->sel[0] = loc_make(0, c->loc.y);
-    if (c->loc.y + 1 < b->nlines) c->sel[1] = loc_make(0, c->loc.y + 1);
-    else c->sel[1] = loc_make(b->lines[c->loc.y].len, c->loc.y);
+    c->sel[0] = cm_loc_make(0, c->loc.y);
+    if (c->loc.y + 1 < b->nlines) c->sel[1] = cm_loc_make(0, c->loc.y + 1);
+    else c->sel[1] = cm_loc_make(b->lines[c->loc.y].len, c->loc.y);
     c->orig[0] = c->sel[0];
     c->orig[1] = c->sel[1];
     c->loc = c->sel[1];
@@ -246,79 +246,71 @@ static int ext_tool = -1; /* 0 none, 1 wl-copy, 2 xclip, 3 xsel, 4 pbcopy */
 static void detect_clip_tool(void) {
     if (ext_tool >= 0) return;
     ext_tool = 0;
-    if (strcmp(plat_null_device(), "/dev/null") != 0) return; /* tools below are POSIX-only */
-    if (getenv("WAYLAND_DISPLAY") && plat_system("command -v wl-copy >/dev/null 2>&1") == 0) ext_tool = 1;
-    else if (getenv("DISPLAY") && plat_system("command -v xclip >/dev/null 2>&1") == 0) ext_tool = 2;
-    else if (getenv("DISPLAY") && plat_system("command -v xsel >/dev/null 2>&1") == 0) ext_tool = 3;
-    else if (plat_system("command -v pbcopy >/dev/null 2>&1") == 0) ext_tool = 4;
+    if (getenv("WAYLAND_DISPLAY") && system("command -v wl-copy >/dev/null 2>&1") == 0) ext_tool = 1;
+    else if (getenv("DISPLAY") && system("command -v xclip >/dev/null 2>&1") == 0) ext_tool = 2;
+    else if (getenv("DISPLAY") && system("command -v xsel >/dev/null 2>&1") == 0) ext_tool = 3;
+    else if (system("command -v pbcopy >/dev/null 2>&1") == 0) ext_tool = 4;
 }
 
 static char *tmp_path(void) {
-    char *dir = plat_temp_dir(), *r;
-    r = xsprintf("%s/micro-clip-%ld-%d", dir ? dir : ".", (long)time(NULL), rand());
+    char *dir = cm_plat_temp_dir(), *r;
+    r = cm_xsprintf("%s/micro-clip-%ld-%d", dir ? dir : ".", (long)time(NULL), rand());
     free(dir);
     return r;
 }
 
-void clipboard_set(const char *s, int len, int lines) {
-    free(E.clipboard);
-    E.clipboard = xstrndup(s, (size_t)len);
-    E.clipboard_len = len;
-    E.clipboard_lines = lines;
+void cm_clipboard_set(const char *s, int len, int lines) {
+    free(cm_E.clipboard);
+    cm_E.clipboard = cm_xstrndup(s, (size_t)len);
+    cm_E.clipboard_len = len;
+    cm_E.clipboard_lines = lines;
     if (!strcmp(GOPTS(O_CLIPBOARD), "terminal")) {
-        scr_osc52(s, len);
+        cm_scr_osc52(s, len);
     } else if (!strcmp(GOPTS(O_CLIPBOARD), "external")) {
-        if (plat_clipboard_set(s, len) == 0) return; /* native (Windows) */
         detect_clip_tool();
         if (ext_tool > 0) {
             char *tp = tmp_path(), *cmd;
-            FILE *f = plat_fopen(tp, "wb");
+            FILE *f = fopen(tp, "wb");
             static const char *cmds[] = {"", "wl-copy", "xclip -selection clipboard -i",
                                          "xsel --clipboard --input", "pbcopy"};
             if (f) {
                 fwrite(s, 1, (size_t)len, f);
                 fclose(f);
-                cmd = xsprintf("%s < '%s' >/dev/null 2>&1", cmds[ext_tool], tp); /* POSIX only */
-                if (plat_system(cmd) != 0) { /* fall back to internal */ }
+                cmd = cm_xsprintf("%s < '%s' >/dev/null 2>&1", cmds[ext_tool], tp); /* POSIX only */
+                if (system(cmd) != 0) { /* fall back to internal */ }
                 free(cmd);
-                plat_remove(tp);
+                remove(tp);
             }
             free(tp);
         }
     }
 }
 
-char *clipboard_get(int *len) {
+char *cm_clipboard_get(int *len) {
     if (!strcmp(GOPTS(O_CLIPBOARD), "external")) {
-        char *native = plat_clipboard_get(len);
-        if (native) {
-            if (E.clipboard && (*len != E.clipboard_len || memcmp(native, E.clipboard, (size_t)*len)))
-                E.clipboard_lines = 0;
-            return native;
-        }
         detect_clip_tool();
         if (ext_tool > 0) {
             static const char *cmds[] = {"", "wl-paste --no-newline", "xclip -selection clipboard -o",
                                          "xsel --clipboard --output", "pbpaste"};
             char *tp = tmp_path();
-            char *cmd = xsprintf("%s > '%s' 2>/dev/null", cmds[ext_tool], tp);
-            int rc = plat_system(cmd);
+            char *cmd = cm_xsprintf("%s > '%s' 2>/dev/null", cmds[ext_tool], tp);
+            int rc = system(cmd);
             long l = 0;
-            char *data = rc == 0 ? read_file(tp, &l) : NULL;
+            char *data = rc == 0 ? cm_read_file(tp, &l) : NULL;
             free(cmd);
-            plat_remove(tp);
+            remove(tp);
             free(tp);
             if (data) {
                 *len = (int)l;
-                if (E.clipboard && (l != E.clipboard_len || memcmp(data, E.clipboard, (size_t)l)))
-                    E.clipboard_lines = 0;
+                if (cm_E.clipboard && (l != cm_E.clipboard_len || memcmp(data, cm_E.clipboard, (size_t)l)))
+                    cm_E.clipboard_lines = 0;
                 return data;
             }
         }
     }
-    if (!E.clipboard) { *len = 0; return xstrdup(""); }
-    *len = E.clipboard_len;
-    return xstrndup(E.clipboard, (size_t)E.clipboard_len);
+    if (!cm_E.clipboard) { *len = 0; return cm_xstrdup(""); }
+    *len = cm_E.clipboard_len;
+    return cm_xstrndup(cm_E.clipboard, (size_t)cm_E.clipboard_len);
 }
 
 /* ================================================================== */
@@ -333,10 +325,10 @@ static Regex *get_search_re(Buffer *b, const char *pat, int regex, char **err) {
     if (err) *err = NULL;
     if (search_cache && search_cache_pat && !strcmp(search_cache_pat, pat) && search_cache_flags == flags)
         return search_cache;
-    re_free(search_cache);
+    cm_re_free(search_cache);
     free(search_cache_pat);
-    search_cache = re_compile(pat, flags, err);
-    search_cache_pat = search_cache ? xstrdup(pat) : NULL;
+    search_cache = cm_re_compile(pat, flags, err);
+    search_cache_pat = search_cache ? cm_xstrdup(pat) : NULL;
     search_cache_flags = flags;
     return search_cache;
 }
@@ -344,7 +336,7 @@ static Regex *get_search_re(Buffer *b, const char *pat, int regex, char **err) {
 static int line_find(Regex *re, const Line *ln, int from, int *ms, int *me) {
     int caps[2];
     if (from > ln->len) return 0;
-    if (!re_search(re, ln->s, ln->len, from, caps, 1)) return 0;
+    if (!cm_re_search(re, ln->s, ln->len, from, caps, 1)) return 0;
     *ms = caps[0];
     *me = caps[1];
     return 1;
@@ -353,17 +345,17 @@ static int line_find(Regex *re, const Line *ln, int from, int *ms, int *me) {
 /* last match in line with start < limit (limit = -1: anywhere) */
 static int line_find_last(Regex *re, const Line *ln, int limit, int *ms, int *me) {
     int pos = 0, found = 0, caps[2];
-    while (pos <= ln->len && re_search(re, ln->s, ln->len, pos, caps, 1)) {
+    while (pos <= ln->len && cm_re_search(re, ln->s, ln->len, pos, caps, 1)) {
         if (limit >= 0 && caps[0] >= limit) break;
         *ms = caps[0];
         *me = caps[1];
         found = 1;
-        pos = caps[1] > caps[0] ? caps[1] : (caps[1] < ln->len ? utf8_next(ln->s, ln->len, caps[1]) : ln->len + 1);
+        pos = caps[1] > caps[0] ? caps[1] : (caps[1] < ln->len ? cm_utf8_next(ln->s, ln->len, caps[1]) : ln->len + 1);
     }
     return found;
 }
 
-int search_find(Pane *p, const char *pat, int regex, Loc from, int down, Loc *ms, Loc *me, char **err) {
+int cm_search_find(Pane *p, const char *pat, int regex, Loc from, int down, Loc *ms, Loc *me, char **err) {
     Buffer *b = p->buf;
     Regex *re = get_search_re(b, pat, regex, err);
     int y, i, s, e;
@@ -374,21 +366,21 @@ int search_find(Pane *p, const char *pat, int regex, Loc from, int down, Loc *ms
             if (i == 0) {
                 if (line_find(re, &b->lines[y], from.x, &s, &e)) {
                     /* skip an empty match at the starting point */
-                    if (s == e && s == from.x && line_find(re, &b->lines[y], s < b->lines[y].len ? utf8_next(b->lines[y].s, b->lines[y].len, s) : s + 1, &s, &e)) {}
+                    if (s == e && s == from.x && line_find(re, &b->lines[y], s < b->lines[y].len ? cm_utf8_next(b->lines[y].s, b->lines[y].len, s) : s + 1, &s, &e)) {}
                     else if (s == e && s == from.x) goto next;
-                    *ms = loc_make(s, y);
-                    *me = loc_make(e, y);
+                    *ms = cm_loc_make(s, y);
+                    *me = cm_loc_make(e, y);
                     return 1;
                 }
             } else if (i == b->nlines) {
                 if (line_find(re, &b->lines[y], 0, &s, &e) && s < from.x) {
-                    *ms = loc_make(s, y);
-                    *me = loc_make(e, y);
+                    *ms = cm_loc_make(s, y);
+                    *me = cm_loc_make(e, y);
                     return 1;
                 }
             } else if (line_find(re, &b->lines[y], 0, &s, &e)) {
-                *ms = loc_make(s, y);
-                *me = loc_make(e, y);
+                *ms = cm_loc_make(s, y);
+                *me = cm_loc_make(e, y);
                 return 1;
             }
         next:;
@@ -398,19 +390,19 @@ int search_find(Pane *p, const char *pat, int regex, Loc from, int down, Loc *ms
             y = ((from.y - i) % b->nlines + b->nlines) % b->nlines;
             if (i == 0) {
                 if (line_find_last(re, &b->lines[y], from.x, &s, &e)) {
-                    *ms = loc_make(s, y);
-                    *me = loc_make(e, y);
+                    *ms = cm_loc_make(s, y);
+                    *me = cm_loc_make(e, y);
                     return 1;
                 }
             } else if (i == b->nlines) {
                 if (line_find_last(re, &b->lines[y], -1, &s, &e) && s >= from.x) {
-                    *ms = loc_make(s, y);
-                    *me = loc_make(e, y);
+                    *ms = cm_loc_make(s, y);
+                    *me = cm_loc_make(e, y);
                     return 1;
                 }
             } else if (line_find_last(re, &b->lines[y], -1, &s, &e)) {
-                *ms = loc_make(s, y);
-                *me = loc_make(e, y);
+                *ms = cm_loc_make(s, y);
+                *me = cm_loc_make(e, y);
                 return 1;
             }
         }
@@ -418,19 +410,19 @@ int search_find(Pane *p, const char *pat, int regex, Loc from, int down, Loc *ms
     return 0;
 }
 
-void search_highlight_ranges(Pane *p, int y, unsigned char *mask, int len) {
+void cm_search_highlight_ranges(Pane *p, int y, unsigned char *mask, int len) {
     Buffer *b = p->buf;
     Regex *re = get_search_re(b, b->last_search, b->last_search_regex, NULL);
     const Line *ln = &b->lines[y];
     int pos = 0, caps[2];
     (void)len;
     if (!re) return;
-    while (pos <= ln->len && re_search(re, ln->s, ln->len, pos, caps, 1)) {
+    while (pos <= ln->len && cm_re_search(re, ln->s, ln->len, pos, caps, 1)) {
         if (caps[1] > caps[0]) {
             memset(mask + caps[0], 1, (size_t)(caps[1] - caps[0]));
             pos = caps[1];
         } else {
-            pos = caps[1] < ln->len ? utf8_next(ln->s, ln->len, caps[1]) : ln->len + 1;
+            pos = caps[1] < ln->len ? cm_utf8_next(ln->s, ln->len, caps[1]) : ln->len + 1;
         }
     }
 }
@@ -441,19 +433,19 @@ static int do_find(Pane *p, int down) {
     Loc from, ms, me;
     char *err = NULL;
     if (!b->last_search || !*b->last_search) return 0;
-    if (down) from = cur_has_sel(c) ? c->sel[1] : c->loc;
-    else from = cur_has_sel(c) ? c->sel[0] : c->loc;
-    if (search_find(p, b->last_search, b->last_search_regex, from, down, &ms, &me, &err)) {
+    if (down) from = cm_cur_has_sel(c) ? c->sel[1] : c->loc;
+    else from = cm_cur_has_sel(c) ? c->sel[0] : c->loc;
+    if (cm_search_find(p, b->last_search, b->last_search_regex, from, down, &ms, &me, &err)) {
         c->sel[0] = c->orig[0] = ms;
         c->sel[1] = c->orig[1] = me;
         c->loc = me;
-        cur_store_vx(p, c);
+        cm_cur_store_vx(p, c);
         b->hl_search = 1;
     } else if (err) {
-        editor_set_error("%s", err);
+        cm_editor_set_error("%s", err);
         free(err);
     } else {
-        editor_set_message("No matches found");
+        cm_editor_set_message("No matches found");
     }
     return 1;
 }
@@ -475,41 +467,41 @@ static int autoclose_is_close(int r) { return r == '"' || r == '\'' || r == '`' 
 static void insert_rune_at_cursor(Pane *p, Cursor *c, int r) {
     Buffer *b = p->buf;
     char buf[4];
-    int n = utf8_encode(r, buf);
-    if (cur_has_sel(c)) delete_selection(p, c);
+    int n = cm_utf8_encode(r, buf);
+    if (cm_cur_has_sel(c)) delete_selection(p, c);
     else if (p->overwrite && c->loc.x < b->lines[c->loc.y].len) {
-        Loc nx = buf_move_chars(b, c->loc, 1);
-        buf_remove(b, c->loc, nx);
+        Loc nx = cm_buf_move_chars(b, c->loc, 1);
+        cm_buf_remove(b, c->loc, nx);
     }
     /* autoclose plugin: typing a closing char that's already there skips over it */
     if (BOPT(b, O_AUTOCLOSE) && !GOPT(O_PASTE) && autoclose_is_close(r) && rune_under(p, c->loc) == r) {
         int prev = char_before(p, c->loc);
         if (!(r == '"' || r == '\'' || r == '`') || prev >= 0) {
-            c->loc = buf_move_chars(b, c->loc, 1);
-            cur_store_vx(p, c);
+            c->loc = cm_buf_move_chars(b, c->loc, 1);
+            cm_cur_store_vx(p, c);
             return;
         }
     }
-    buf_insert(b, c->loc, buf, n);
+    cm_buf_insert(b, c->loc, buf, n);
     if (BOPT(b, O_AUTOCLOSE) && !GOPT(O_PASTE) && autoclose_open(r)) {
         int next = rune_under(p, c->loc);
         int prev;
-        Loc before = buf_move_chars(b, c->loc, -1);
+        Loc before = cm_buf_move_chars(b, c->loc, -1);
         prev = char_before(p, before);
-        if ((r == '"' || r == '\'' || r == '`') && prev >= 0 && (is_word_char(prev) || prev == r)) {
+        if ((r == '"' || r == '\'' || r == '`') && prev >= 0 && (cm_is_word_char(prev) || prev == r)) {
             /* don't autoclose quotes right after a word char */
-        } else if (next < 0 || !is_word_char(next)) {
+        } else if (next < 0 || !cm_is_word_char(next)) {
             int cl = autoclose_close_of(r);
             Loc save = c->loc;
-            n = utf8_encode(cl, buf);
-            buf_insert(b, c->loc, buf, n);
+            n = cm_utf8_encode(cl, buf);
+            cm_buf_insert(b, c->loc, buf, n);
             c->loc = save;
         }
     }
-    cur_store_vx(p, c);
+    cm_cur_store_vx(p, c);
 }
 
-int insert_rune(Pane *p, int r) {
+int cm_insert_rune(Pane *p, int r) {
     int i, saved = p->active;
     ac_clear();
     if (readonly_check(p)) return 0;
@@ -518,39 +510,39 @@ int insert_rune(Pane *p, int r) {
         insert_rune_at_cursor(p, &p->cur[i], r);
     }
     p->active = saved;
-    pane_merge_cursors(p);
-    macro_record(1, NULL, 0, r);
+    cm_pane_merge_cursors(p);
+    cm_macro_record(1, NULL, 0, r);
     return 1;
 }
 
-void insert_text(Pane *p, const char *s, int len, int paste) {
+void cm_insert_text(Pane *p, const char *s, int len, int paste) {
     int i, saved = p->active;
     ac_clear();
     if (readonly_check(p)) return;
     for (i = 0; i < p->ncur; i++) {
         Cursor *c = &p->cur[i];
         p->active = i;
-        if (cur_has_sel(c)) delete_selection(p, c);
-        buf_insert(p->buf, c->loc, s, len);
-        cur_store_vx(p, c);
+        if (cm_cur_has_sel(c)) delete_selection(p, c);
+        cm_buf_insert(p->buf, c->loc, s, len);
+        cm_cur_store_vx(p, c);
     }
     p->active = saved;
-    if (paste) macro_record(2, s, len, 0);
+    if (paste) cm_macro_record(2, s, len, 0);
 }
 
 /* ================================================================== */
 /* Macros                                                              */
 
-void macro_record(int kind, const char *s, int len, int rune) {
+void cm_macro_record(int kind, const char *s, int len, int rune) {
     MacroItem *m;
-    if (!E.recording_macro || E.playing_macro) return;
-    if (E.nmacro == E.cmacro) {
-        E.cmacro = E.cmacro ? E.cmacro * 2 : 32;
-        E.macro = xrealloc(E.macro, sizeof *E.macro * (size_t)E.cmacro);
+    if (!cm_E.recording_macro || cm_E.playing_macro) return;
+    if (cm_E.nmacro == cm_E.cmacro) {
+        cm_E.cmacro = cm_E.cmacro ? cm_E.cmacro * 2 : 32;
+        cm_E.macro = cm_xrealloc(cm_E.macro, sizeof *cm_E.macro * (size_t)cm_E.cmacro);
     }
-    m = &E.macro[E.nmacro++];
+    m = &cm_E.macro[cm_E.nmacro++];
     m->kind = kind;
-    m->s = s ? xstrndup(s, (size_t)len) : NULL;
+    m->s = s ? cm_xstrndup(s, (size_t)len) : NULL;
     m->len = len;
     m->rune = rune;
 }
@@ -558,7 +550,7 @@ void macro_record(int kind, const char *s, int len, int rune) {
 /* ================================================================== */
 /* Brace matching                                                      */
 
-int find_matching_brace(Buffer *b, Loc cur, int left, Loc *brace, Loc *match) {
+int cm_find_matching_brace(Buffer *b, Loc cur, int left, Loc *brace, Loc *match) {
     static const char *pairs[] = {"()", "{}", "[]"};
     int k, cand;
     for (cand = 0; cand < 2; cand++) {
@@ -566,9 +558,9 @@ int find_matching_brace(Buffer *b, Loc cur, int left, Loc *brace, Loc *match) {
         int r;
         if (cand == 1) {
             if (!left || cur.x == 0) break;
-            at.x = utf8_prev(b->lines[cur.y].s, cur.x);
+            at.x = cm_utf8_prev(b->lines[cur.y].s, cur.x);
         }
-        r = buf_char_at(b, at);
+        r = cm_buf_char_at(b, at);
         if (r < 0) continue;
         for (k = 0; k < 3; k++) {
             int open = pairs[k][0], close = pairs[k][1], depth = 0;
@@ -582,7 +574,7 @@ int find_matching_brace(Buffer *b, Loc cur, int left, Loc *brace, Loc *match) {
                         else if (ln->s[x] == close) {
                             if (--depth == 0) {
                                 *brace = at;
-                                *match = loc_make(x, y);
+                                *match = cm_loc_make(x, y);
                                 return 1;
                             }
                         }
@@ -600,7 +592,7 @@ int find_matching_brace(Buffer *b, Loc cur, int left, Loc *brace, Loc *match) {
                         else if (ln->s[x] == open) {
                             if (--depth == 0) {
                                 *brace = at;
-                                *match = loc_make(x, y);
+                                *match = cm_loc_make(x, y);
                                 return 1;
                             }
                         }
@@ -621,158 +613,158 @@ static int a_none(Pane *p) { (void)p; return 1; }
 
 static int a_cursor_up(Pane *p) {
     Cursor *c = CUR;
-    cur_deselect(c, 1);
-    cur_up(p, c, 1);
+    cm_cur_deselect(c, 1);
+    cm_cur_up(p, c, 1);
     return 1;
 }
 static int a_cursor_down(Pane *p) {
     Cursor *c = CUR;
-    cur_deselect(c, 0);
-    cur_down(p, c, 1);
+    cm_cur_deselect(c, 0);
+    cm_cur_down(p, c, 1);
     return 1;
 }
 static int a_cursor_left(Pane *p) {
     Cursor *c = CUR;
-    if (cur_has_sel(c)) { cur_deselect(c, 1); cur_store_vx(p, c); }
-    else cur_left(p, c);
+    if (cm_cur_has_sel(c)) { cm_cur_deselect(c, 1); cm_cur_store_vx(p, c); }
+    else cm_cur_left(p, c);
     return 1;
 }
 static int a_cursor_right(Pane *p) {
     Cursor *c = CUR;
-    if (cur_has_sel(c)) { cur_deselect(c, 0); cur_store_vx(p, c); }
-    else cur_right(p, c);
+    if (cm_cur_has_sel(c)) { cm_cur_deselect(c, 0); cm_cur_store_vx(p, c); }
+    else cm_cur_right(p, c);
     return 1;
 }
 static int page_size(Pane *p) {
-    int h = pane_text_height(p) - BOPT(p->buf, O_PAGEOVERLAP);
+    int h = cm_pane_text_height(p) - BOPT(p->buf, O_PAGEOVERLAP);
     return h < 1 ? 1 : h;
 }
 static int a_cursor_page_up(Pane *p) {
     Cursor *c = CUR;
-    cur_deselect(c, 1);
-    pane_scroll(p, -page_size(p));
-    cur_up(p, c, page_size(p));
+    cm_cur_deselect(c, 1);
+    cm_pane_scroll(p, -page_size(p));
+    cm_cur_up(p, c, page_size(p));
     return 1;
 }
 static int a_cursor_page_down(Pane *p) {
     Cursor *c = CUR;
-    cur_deselect(c, 0);
-    pane_scroll(p, page_size(p));
-    cur_down(p, c, page_size(p));
+    cm_cur_deselect(c, 0);
+    cm_pane_scroll(p, page_size(p));
+    cm_cur_down(p, c, page_size(p));
     return 1;
 }
 static int a_cursor_start(Pane *p) {
     Cursor *c = CUR;
-    cur_deselect(c, 1);
-    c->loc = loc_make(0, 0);
-    cur_store_vx(p, c);
+    cm_cur_deselect(c, 1);
+    c->loc = cm_loc_make(0, 0);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 static int a_cursor_end(Pane *p) {
     Cursor *c = CUR;
-    cur_deselect(c, 1);
-    c->loc = buf_end(p->buf);
-    cur_store_vx(p, c);
+    cm_cur_deselect(c, 1);
+    c->loc = cm_buf_end(p->buf);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 static int view_row_loc(Pane *p, int r, Loc *out) {
-    return pane_screen_to_loc(p, p->x + pane_gutter_width(p), p->y + r, out);
+    return cm_pane_screen_to_loc(p, p->x + cm_pane_gutter_width(p), p->y + r, out);
 }
 static int a_cursor_to_view_top(Pane *p) {
     Cursor *c = CUR;
     int m = BOPT(p->buf, O_SCROLLMARGIN);
-    cur_deselect(c, 1);
-    view_row_loc(p, p->top == 0 ? 0 : m, &c->loc);
-    cur_store_vx(p, c);
+    cm_cur_deselect(c, 1);
+    view_row_loc(p, p->first_line == 0 ? 0 : m, &c->loc);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 static int a_cursor_to_view_center(Pane *p) {
     Cursor *c = CUR;
-    cur_deselect(c, 1);
-    view_row_loc(p, pane_text_height(p) / 2, &c->loc);
-    cur_store_vx(p, c);
+    cm_cur_deselect(c, 1);
+    view_row_loc(p, cm_pane_text_height(p) / 2, &c->loc);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 static int a_cursor_to_view_bottom(Pane *p) {
     Cursor *c = CUR;
     int m = BOPT(p->buf, O_SCROLLMARGIN);
-    cur_deselect(c, 1);
-    view_row_loc(p, pane_text_height(p) - 1 - m, &c->loc);
-    cur_store_vx(p, c);
+    cm_cur_deselect(c, 1);
+    view_row_loc(p, cm_pane_text_height(p) - 1 - m, &c->loc);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 static int a_select_to_start(Pane *p) {
     Cursor *c = CUR;
     begin_select(c);
-    c->loc = loc_make(0, 0);
+    c->loc = cm_loc_make(0, 0);
     select_to(p, c, c->loc);
-    cur_store_vx(p, c);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 static int a_select_to_end(Pane *p) {
     Cursor *c = CUR;
     begin_select(c);
-    c->loc = buf_end(p->buf);
+    c->loc = cm_buf_end(p->buf);
     select_to(p, c, c->loc);
-    cur_store_vx(p, c);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 static int a_select_up(Pane *p) {
     Cursor *c = CUR;
     begin_select(c);
-    cur_up(p, c, 1);
+    cm_cur_up(p, c, 1);
     select_to(p, c, c->loc);
     return 1;
 }
 static int a_select_down(Pane *p) {
     Cursor *c = CUR;
     begin_select(c);
-    cur_down(p, c, 1);
+    cm_cur_down(p, c, 1);
     select_to(p, c, c->loc);
     return 1;
 }
 static int a_select_left(Pane *p) {
     Cursor *c = CUR;
-    Loc end = buf_end(p->buf);
+    Loc end = cm_buf_end(p->buf);
     begin_select(c);
-    if (loc_cmp(c->loc, end) > 0) c->loc = end;
-    cur_left(p, c);
+    if (cm_loc_cmp(c->loc, end) > 0) c->loc = end;
+    cm_cur_left(p, c);
     select_to(p, c, c->loc);
     return 1;
 }
 static int a_select_right(Pane *p) {
     Cursor *c = CUR;
     begin_select(c);
-    cur_right(p, c);
+    cm_cur_right(p, c);
     select_to(p, c, c->loc);
     return 1;
 }
 static int a_word_right(Pane *p) {
     Cursor *c = CUR;
-    cur_deselect(c, 0);
+    cm_cur_deselect(c, 0);
     word_right(p, c);
-    cur_store_vx(p, c);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 static int a_word_left(Pane *p) {
     Cursor *c = CUR;
-    cur_deselect(c, 1);
+    cm_cur_deselect(c, 1);
     word_left(p, c);
-    cur_store_vx(p, c);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 static int a_subword_right(Pane *p) {
     Cursor *c = CUR;
-    cur_deselect(c, 0);
+    cm_cur_deselect(c, 0);
     subword_right(p, c);
-    cur_store_vx(p, c);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 static int a_subword_left(Pane *p) {
     Cursor *c = CUR;
-    cur_deselect(c, 1);
+    cm_cur_deselect(c, 1);
     subword_left(p, c);
-    cur_store_vx(p, c);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 static int a_select_word_right(Pane *p) {
@@ -780,7 +772,7 @@ static int a_select_word_right(Pane *p) {
     begin_select(c);
     word_right(p, c);
     select_to(p, c, c->loc);
-    cur_store_vx(p, c);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 static int a_select_word_left(Pane *p) {
@@ -788,7 +780,7 @@ static int a_select_word_left(Pane *p) {
     begin_select(c);
     word_left(p, c);
     select_to(p, c, c->loc);
-    cur_store_vx(p, c);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 static int a_select_subword_right(Pane *p) {
@@ -796,7 +788,7 @@ static int a_select_subword_right(Pane *p) {
     begin_select(c);
     subword_right(p, c);
     select_to(p, c, c->loc);
-    cur_store_vx(p, c);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 static int a_select_subword_left(Pane *p) {
@@ -804,15 +796,15 @@ static int a_select_subword_left(Pane *p) {
     begin_select(c);
     subword_left(p, c);
     select_to(p, c, c->loc);
-    cur_store_vx(p, c);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 static int delete_sel_if(Pane *p) {
     Cursor *c = CUR;
-    if (cur_has_sel(c)) {
+    if (cm_cur_has_sel(c)) {
         if (readonly_check(p)) return 0;
         delete_selection(p, c);
-        cur_store_vx(p, c);
+        cm_cur_store_vx(p, c);
     }
     return 1;
 }
@@ -823,7 +815,7 @@ static int a_delete_subword_left(Pane *p) { a_select_subword_left(p); return del
 
 static int a_select_line(Pane *p) {
     select_line_at(p, CUR);
-    cur_store_vx(p, CUR);
+    cm_cur_store_vx(p, CUR);
     return 1;
 }
 static int a_select_to_start_of_line(Pane *p) {
@@ -831,7 +823,7 @@ static int a_select_to_start_of_line(Pane *p) {
     begin_select(c);
     c->loc.x = 0;
     select_to(p, c, c->loc);
-    cur_store_vx(p, c);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 static int a_select_to_start_of_text(Pane *p) {
@@ -839,7 +831,7 @@ static int a_select_to_start_of_text(Pane *p) {
     begin_select(c);
     c->loc.x = start_of_text_x(p, c->loc.y);
     select_to(p, c, c->loc);
-    cur_store_vx(p, c);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 static int a_select_to_start_of_text_toggle(Pane *p) {
@@ -848,7 +840,7 @@ static int a_select_to_start_of_text_toggle(Pane *p) {
     begin_select(c);
     c->loc.x = c->loc.x == st ? 0 : st;
     select_to(p, c, c->loc);
-    cur_store_vx(p, c);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 static int a_select_to_end_of_line(Pane *p) {
@@ -856,7 +848,7 @@ static int a_select_to_end_of_line(Pane *p) {
     begin_select(c);
     c->loc.x = p->buf->lines[c->loc.y].len;
     select_to(p, c, c->loc);
-    cur_store_vx(p, c);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 static int is_blank_line(Buffer *b, int y) {
@@ -869,23 +861,23 @@ static void paragraph_prev(Pane *p, Cursor *c) {
     int y = c->loc.y;
     while (y > 0 && is_blank_line(p->buf, y)) y--;
     while (y > 0 && !is_blank_line(p->buf, y)) y--;
-    c->loc = loc_make(0, y);
+    c->loc = cm_loc_make(0, y);
 }
 static void paragraph_next(Pane *p, Cursor *c) {
     Buffer *b = p->buf;
     int y = c->loc.y;
     while (y < b->nlines - 1 && is_blank_line(b, y)) y++;
     while (y < b->nlines - 1 && !is_blank_line(b, y)) y++;
-    c->loc = loc_make(y == b->nlines - 1 ? b->lines[y].len : 0, y);
+    c->loc = cm_loc_make(y == b->nlines - 1 ? b->lines[y].len : 0, y);
 }
-static int a_paragraph_previous(Pane *p) { cur_deselect(CUR, 1); paragraph_prev(p, CUR); cur_store_vx(p, CUR); return 1; }
-static int a_paragraph_next(Pane *p) { cur_deselect(CUR, 0); paragraph_next(p, CUR); cur_store_vx(p, CUR); return 1; }
+static int a_paragraph_previous(Pane *p) { cm_cur_deselect(CUR, 1); paragraph_prev(p, CUR); cm_cur_store_vx(p, CUR); return 1; }
+static int a_paragraph_next(Pane *p) { cm_cur_deselect(CUR, 0); paragraph_next(p, CUR); cm_cur_store_vx(p, CUR); return 1; }
 static int a_select_to_paragraph_previous(Pane *p) {
     Cursor *c = CUR;
     begin_select(c);
     paragraph_prev(p, c);
     select_to(p, c, c->loc);
-    cur_store_vx(p, c);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 static int a_select_to_paragraph_next(Pane *p) {
@@ -893,7 +885,7 @@ static int a_select_to_paragraph_next(Pane *p) {
     begin_select(c);
     paragraph_next(p, c);
     select_to(p, c, c->loc);
-    cur_store_vx(p, c);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 
@@ -904,40 +896,40 @@ static int a_insert_newline(Pane *p) {
     const char *ln;
     char *ws;
     if (readonly_check(p)) return 0;
-    if (cur_has_sel(c)) delete_selection(p, c);
+    if (cm_cur_has_sel(c)) delete_selection(p, c);
     /* autoclose: "{|}" + Enter -> block */
     if (BOPT(b, O_AUTOCLOSE) && !GOPT(O_PASTE) && c->loc.x > 0) {
         int cr = char_before(p, c->loc), nr = rune_under(p, c->loc);
         if ((cr == '(' && nr == ')') || (cr == '{' && nr == '}') || (cr == '[' && nr == ']')) {
-            char *ind = buf_indent_string(b);
+            char *ind = cm_buf_indent_string(b);
             int l;
-            const char *s = buf_leading_ws(b, c->loc.y, &l);
-            char *wsv = xstrndup(s, (size_t)l);
-            char *txt = xsprintf("\n%s%s\n%s", wsv, ind, wsv);
+            const char *s = cm_buf_leading_ws(b, c->loc.y, &l);
+            char *wsv = cm_xstrndup(s, (size_t)l);
+            char *txt = cm_xsprintf("\n%s%s\n%s", wsv, ind, wsv);
             Loc start = c->loc;
-            buf_insert(b, c->loc, txt, (int)strlen(txt));
-            c->loc = loc_make(l + (int)strlen(ind), start.y + 1);
+            cm_buf_insert(b, c->loc, txt, (int)strlen(txt));
+            c->loc = cm_loc_make(l + (int)strlen(ind), start.y + 1);
             free(txt);
             free(wsv);
             free(ind);
-            cur_store_vx(p, c);
+            cm_cur_store_vx(p, c);
             return 1;
         }
     }
-    ln = buf_leading_ws(b, c->loc.y, &wslen);
-    ws = xstrndup(ln, (size_t)wslen);
+    ln = cm_buf_leading_ws(b, c->loc.y, &wslen);
+    ws = cm_xstrndup(ln, (size_t)wslen);
     cx = c->loc.x;
-    buf_insert(b, c->loc, "\n", 1);
+    cm_buf_insert(b, c->loc, "\n", 1);
     if (BOPT(b, O_AUTOINDENT) && !GOPT(O_PASTE)) {
         if (cx < wslen) ws[cx] = 0;
-        buf_insert(b, c->loc, ws, (int)strlen(ws));
+        cm_buf_insert(b, c->loc, ws, (int)strlen(ws));
         if (is_blank_line(b, c->loc.y - 1) && b->lines[c->loc.y - 1].len > 0 && !BOPT(b, O_KEEPAUTOINDENT)) {
             int y = c->loc.y - 1;
-            buf_remove(b, loc_make(0, y), loc_make(b->lines[y].len, y));
+            cm_buf_remove(b, cm_loc_make(0, y), cm_loc_make(b->lines[y].len, y));
         }
     }
     free(ws);
-    cur_store_vx(p, c);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 
@@ -945,7 +937,7 @@ static int a_backspace(Pane *p) {
     Buffer *b = BUF;
     Cursor *c = CUR;
     if (readonly_check(p)) return 0;
-    if (cur_has_sel(c)) {
+    if (cm_cur_has_sel(c)) {
         delete_selection(p, c);
     } else if (c->loc.x > 0 || c->loc.y > 0) {
         int ts = BOPT(b, O_TABSIZE), i, allsp = 1;
@@ -956,17 +948,17 @@ static int a_backspace(Pane *p) {
         if (BOPT(b, O_AUTOCLOSE) && !GOPT(O_PASTE) && c->loc.x > 0) {
             int cr = char_before(p, c->loc), nr = rune_under(p, c->loc);
             if (nr >= 0 && autoclose_open(cr) && autoclose_close_of(cr) == nr) {
-                Loc nx = buf_move_chars(b, c->loc, 1);
-                buf_remove(b, c->loc, nx);
+                Loc nx = cm_buf_move_chars(b, c->loc, 1);
+                cm_buf_remove(b, c->loc, nx);
             }
         }
         if (BOPT(b, O_TABSTOSPACES) && allsp && c->loc.x > 0 && c->loc.x % ts == 0)
-            start = loc_make(c->loc.x - ts, c->loc.y);
+            start = cm_loc_make(c->loc.x - ts, c->loc.y);
         else
-            start = buf_move_chars(b, c->loc, -1);
-        buf_remove(b, start, c->loc);
+            start = cm_buf_move_chars(b, c->loc, -1);
+        cm_buf_remove(b, start, c->loc);
     }
-    cur_store_vx(p, c);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 
@@ -974,8 +966,8 @@ static int a_delete(Pane *p) {
     Buffer *b = BUF;
     Cursor *c = CUR;
     if (readonly_check(p)) return 0;
-    if (cur_has_sel(c)) delete_selection(p, c);
-    else if (loc_cmp(c->loc, buf_end(b)) < 0) buf_remove(b, c->loc, buf_move_chars(b, c->loc, 1));
+    if (cm_cur_has_sel(c)) delete_selection(p, c);
+    else if (cm_loc_cmp(c->loc, cm_buf_end(b)) < 0) cm_buf_remove(b, c->loc, cm_buf_move_chars(b, c->loc, 1));
     return 1;
 }
 
@@ -985,18 +977,18 @@ static int a_insert_tab(Pane *p) {
     char *ind;
     int tb, until;
     if (readonly_check(p)) return 0;
-    if (cur_has_sel(c)) delete_selection(p, c);
-    ind = buf_indent_string(b);
+    if (cm_cur_has_sel(c)) delete_selection(p, c);
+    ind = cm_buf_indent_string(b);
     tb = (int)strlen(ind);
-    until = tb - (pane_visual_x(p, c->loc.y, c->loc.x) % tb);
-    buf_insert(b, c->loc, ind, until);
+    until = tb - (cm_pane_visual_x(p, c->loc.y, c->loc.x) % tb);
+    cm_buf_insert(b, c->loc, ind, until);
     free(ind);
-    cur_store_vx(p, c);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 
 static int sel_line_range(Pane *p, Cursor *c, int *y0, int *y1) {
-    if (!cur_has_sel(c)) {
+    if (!cm_cur_has_sel(c)) {
         *y0 = *y1 = c->loc.y;
         return 0;
     }
@@ -1009,10 +1001,10 @@ static int sel_line_range(Pane *p, Cursor *c, int *y0, int *y1) {
 
 static void indent_lines(Pane *p, int y0, int y1) {
     Buffer *b = BUF;
-    char *ind = buf_indent_string(b);
+    char *ind = cm_buf_indent_string(b);
     int y;
     for (y = y0; y <= y1; y++)
-        if (b->lines[y].len > 0 || y0 == y1) buf_insert(b, loc_make(0, y), ind, (int)strlen(ind));
+        if (b->lines[y].len > 0 || y0 == y1) cm_buf_insert(b, cm_loc_make(0, y), ind, (int)strlen(ind));
     free(ind);
 }
 
@@ -1020,18 +1012,18 @@ static void indent_lines(Pane *p, int y0, int y1) {
 static void outdent_line(Pane *p, int y) {
     Buffer *b = BUF;
     const Line *ln = &b->lines[y];
-    char *ind = buf_indent_string(b);
+    char *ind = cm_buf_indent_string(b);
     int want = (int)strlen(ind), n = 0;
     free(ind);
     while (n < want && n < ln->len && (ln->s[n] == ' ' || ln->s[n] == '\t')) n++;
-    if (n) buf_remove(b, loc_make(0, y), loc_make(n, y));
+    if (n) cm_buf_remove(b, cm_loc_make(0, y), cm_loc_make(n, y));
 }
 
 static int a_indent_selection(Pane *p) {
     Cursor *c = CUR;
     int y0, y1;
     Loc s0, s1;
-    if (!cur_has_sel(c)) return 0;
+    if (!cm_cur_has_sel(c)) return 0;
     if (readonly_check(p)) return 0;
     sel_line_range(p, c, &y0, &y1);
     s0 = c->sel[0];
@@ -1039,14 +1031,14 @@ static int a_indent_selection(Pane *p) {
     indent_lines(p, y0, y1);
     /* keep whole lines selected */
     {
-        char *ind = buf_indent_string(BUF);
+        char *ind = cm_buf_indent_string(BUF);
         int il = (int)strlen(ind);
         free(ind);
-        c->sel[0] = loc_make(s0.x > 0 ? s0.x + il : 0, s0.y);
-        c->sel[1] = loc_make(s1.x > 0 || s1.y == y1 ? s1.x + il : 0, s1.y);
-        if (s1.x == 0 && s1.y > y1) c->sel[1] = loc_make(0, s1.y);
-        c->sel[0] = buf_clamp(BUF, c->sel[0]);
-        c->sel[1] = buf_clamp(BUF, c->sel[1]);
+        c->sel[0] = cm_loc_make(s0.x > 0 ? s0.x + il : 0, s0.y);
+        c->sel[1] = cm_loc_make(s1.x > 0 || s1.y == y1 ? s1.x + il : 0, s1.y);
+        if (s1.x == 0 && s1.y > y1) c->sel[1] = cm_loc_make(0, s1.y);
+        c->sel[0] = cm_buf_clamp(BUF, c->sel[0]);
+        c->sel[1] = cm_buf_clamp(BUF, c->sel[1]);
         c->orig[0] = c->sel[0];
         c->orig[1] = c->sel[1];
         c->loc = c->sel[1];
@@ -1058,7 +1050,7 @@ static int a_outdent_selection(Pane *p) {
     Cursor *c = CUR;
     int y0, y1, y;
     Loc s0, s1;
-    if (!cur_has_sel(c)) return 0;
+    if (!cm_cur_has_sel(c)) return 0;
     if (readonly_check(p)) return 0;
     sel_line_range(p, c, &y0, &y1);
     s0 = c->sel[0];
@@ -1074,18 +1066,18 @@ static int a_outdent_selection(Pane *p) {
 }
 
 static int a_outdent_line(Pane *p) {
-    if (cur_has_sel(CUR)) return 0;
+    if (cm_cur_has_sel(CUR)) return 0;
     if (readonly_check(p)) return 0;
     outdent_line(p, CUR->loc.y);
-    cur_store_vx(p, CUR);
+    cm_cur_store_vx(p, CUR);
     return 1;
 }
 
 static int a_indent_line(Pane *p) {
-    if (cur_has_sel(CUR)) return 0;
+    if (cm_cur_has_sel(CUR)) return 0;
     if (readonly_check(p)) return 0;
     indent_lines(p, CUR->loc.y, CUR->loc.y);
-    cur_store_vx(p, CUR);
+    cm_cur_store_vx(p, CUR);
     return 1;
 }
 
@@ -1095,31 +1087,31 @@ static int a_autocomplete(Pane *p) {
     Cursor *c = CUR;
     int x, start, y, i;
     char *prefix;
-    if (cur_has_sel(c)) return 0;
+    if (cm_cur_has_sel(c)) return 0;
     if (ac_pane == p && ac_n > 0) {
         /* cycle forward */
         char *cur = ac_sugg[ac_idx];
-        Loc a = loc_make(ac_start.x + ac_prefix, ac_start.y);
+        Loc a = cm_loc_make(ac_start.x + ac_prefix, ac_start.y);
         ac_idx = (ac_idx + 1) % ac_n;
-        buf_remove(b, a, loc_make(a.x + ac_inserted, a.y));
+        cm_buf_remove(b, a, cm_loc_make(a.x + ac_inserted, a.y));
         (void)cur;
         cur = ac_sugg[ac_idx];
         ac_inserted = (int)strlen(cur) - ac_prefix;
-        buf_insert(b, a, cur + ac_prefix, ac_inserted);
-        c->loc = loc_make(a.x + ac_inserted, a.y);
-        cur_store_vx(p, c);
+        cm_buf_insert(b, a, cur + ac_prefix, ac_inserted);
+        c->loc = cm_loc_make(a.x + ac_inserted, a.y);
+        cm_cur_store_vx(p, c);
         return 1;
     }
     x = c->loc.x;
     if (x == 0) return 0;
     {
         int r = rune_under(p, c->loc), pr = char_before(p, c->loc);
-        if (!is_word_char(pr) || (r >= 0 && is_word_char(r))) return 0;
+        if (!cm_is_word_char(pr) || (r >= 0 && cm_is_word_char(r))) return 0;
     }
     start = x;
-    while (start > 0 && is_word_char(char_before(p, loc_make(start, c->loc.y))))
-        start = utf8_prev(b->lines[c->loc.y].s, start);
-    prefix = xstrndup(b->lines[c->loc.y].s + start, (size_t)(x - start));
+    while (start > 0 && cm_is_word_char(char_before(p, cm_loc_make(start, c->loc.y))))
+        start = cm_utf8_prev(b->lines[c->loc.y].s, start);
+    prefix = cm_xstrndup(b->lines[c->loc.y].s + start, (size_t)(x - start));
     ac_clear();
     /* scan the buffer from the cursor outwards so nearer words come first */
     for (i = 0; i < b->nlines; i++) {
@@ -1131,20 +1123,20 @@ static int a_autocomplete(Pane *p) {
             if (y < 0 || y >= b->nlines || (k == 1 && i == 0)) continue;
             ln = &b->lines[y];
             while (pos < ln->len) {
-                int cp, n = utf8_decode(ln->s + pos, ln->len - pos, &cp);
-                if (is_word_char(cp) && (pos == 0 || !is_word_char(char_before(p, loc_make(pos, y))))) {
+                int cp, n = cm_utf8_decode(ln->s + pos, ln->len - pos, &cp);
+                if (cm_is_word_char(cp) && (pos == 0 || !cm_is_word_char(char_before(p, cm_loc_make(pos, y))))) {
                     int e = pos, j, dup = 0;
                     while (e < ln->len) {
-                        int c2, n2 = utf8_decode(ln->s + e, ln->len - e, &c2);
-                        if (!is_word_char(c2)) break;
+                        int c2, n2 = cm_utf8_decode(ln->s + e, ln->len - e, &c2);
+                        if (!cm_is_word_char(c2)) break;
                         e += n2;
                     }
                     if (e - pos > (int)strlen(prefix) && !strncmp(ln->s + pos, prefix, strlen(prefix)) &&
                         !(y == c->loc.y && pos == start)) {
-                        char *w = xstrndup(ln->s + pos, (size_t)(e - pos));
+                        char *w = cm_xstrndup(ln->s + pos, (size_t)(e - pos));
                         for (j = 0; j < ac_n; j++) if (!strcmp(ac_sugg[j], w)) dup = 1;
                         if (!dup) {
-                            ac_sugg = xrealloc(ac_sugg, sizeof *ac_sugg * (size_t)(ac_n + 1));
+                            ac_sugg = cm_xrealloc(ac_sugg, sizeof *ac_sugg * (size_t)(ac_n + 1));
                             ac_sugg[ac_n++] = w;
                         } else free(w);
                     }
@@ -1162,12 +1154,12 @@ static int a_autocomplete(Pane *p) {
     }
     ac_pane = p;
     ac_idx = 0;
-    ac_start = loc_make(start, c->loc.y);
+    ac_start = cm_loc_make(start, c->loc.y);
     ac_prefix = (int)strlen(prefix);
     ac_inserted = (int)strlen(ac_sugg[0]) - ac_prefix;
-    buf_insert(b, c->loc, ac_sugg[0] + ac_prefix, ac_inserted);
+    cm_buf_insert(b, c->loc, ac_sugg[0] + ac_prefix, ac_inserted);
     free(prefix);
-    cur_store_vx(p, c);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 
@@ -1176,13 +1168,13 @@ static int a_cycle_autocomplete_back(Pane *p) {
     Cursor *c = CUR;
     Loc a;
     if (ac_pane != p || ac_n == 0) return 0;
-    a = loc_make(ac_start.x + ac_prefix, ac_start.y);
-    buf_remove(b, a, loc_make(a.x + ac_inserted, a.y));
+    a = cm_loc_make(ac_start.x + ac_prefix, ac_start.y);
+    cm_buf_remove(b, a, cm_loc_make(a.x + ac_inserted, a.y));
     ac_idx = (ac_idx - 1 + ac_n) % ac_n;
     ac_inserted = (int)strlen(ac_sugg[ac_idx]) - ac_prefix;
-    buf_insert(b, a, ac_sugg[ac_idx] + ac_prefix, ac_inserted);
-    c->loc = loc_make(a.x + ac_inserted, a.y);
-    cur_store_vx(p, c);
+    cm_buf_insert(b, a, ac_sugg[ac_idx] + ac_prefix, ac_inserted);
+    c->loc = cm_loc_make(a.x + ac_inserted, a.y);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 
@@ -1206,11 +1198,11 @@ static void sudo_yn(int yes, int canceled, void *data) {
     SudoCtx *s = data;
     char *err = NULL;
     if (yes && !canceled) {
-        if (buf_save_sudo(s->p->buf, s->path, &err) == 0) {
-            editor_set_message("Saved %s", s->path);
+        if (cm_buf_save_sudo(s->p->buf, s->path, &err) == 0) {
+            cm_editor_set_message("Saved %s", s->path);
             if (s->then_quit) quit_after_save(s->p);
         } else {
-            editor_set_error("%s", err);
+            cm_editor_set_error("%s", err);
             free(err);
         }
     }
@@ -1221,32 +1213,26 @@ static void sudo_yn(int yes, int canceled, void *data) {
 /* returns 1 if saved now; on permission errors offers sudo (micro's autosu) */
 static int save_to(Pane *p, const char *path, int then_quit) {
     char *err = NULL;
-    int rc = buf_save(p->buf, path, &err);
+    int rc = cm_buf_save(p->buf, path, &err);
     if (rc == 0) {
-        editor_set_message("Saved %s", path);
+        cm_editor_set_message("Saved %s", path);
         return 1;
     }
     if (rc == -2) {
-        SudoCtx *s = xmalloc(sizeof *s);
+        SudoCtx *s = cm_xmalloc(sizeof *s);
         s->p = p;
-        s->path = xstrdup(path);
+        s->path = cm_xstrdup(path);
         s->then_quit = then_quit;
         free(err);
-        if (!plat_has_sudo()) {
-            editor_set_error("Permission denied. Save with sudo not supported on Windows");
-            free(s->path);
-            free(s);
-            return 0;
-        }
         if (BOPT(p->buf, O_AUTOSU)) sudo_yn(1, 0, s);
         else {
-            char *msg = xsprintf("Permission denied. Do you want to save this file using %s? (y,n)", GOPTS(O_SUCMD));
-            prompt_yn(msg, sudo_yn, s);
+            char *msg = cm_xsprintf("Permission denied. Do you want to save this file using %s? (y,n)", GOPTS(O_SUCMD));
+            cm_prompt_yn(msg, sudo_yn, s);
             free(msg);
         }
         return 0;
     }
-    editor_set_error("%s", err);
+    cm_editor_set_error("%s", err);
     free(err);
     return 0;
 }
@@ -1262,19 +1248,19 @@ static void saveas_done(const char *resp, int canceled, void *data) {
     free(ctx);
 }
 
-int save_pane(Pane *p, int then_quit) {
+int cm_save_pane(Pane *p, int then_quit) {
     Buffer *b = BUF;
     char *err = NULL;
     if (b->type != BT_DEFAULT) return 0;
     if (BOPT(b, O_READONLY)) {
-        editor_set_message("Cannot save readonly buffer");
+        cm_editor_set_message("Cannot save readonly buffer");
         return 0;
     }
     if (!*b->path) {
-        SaveCtx *ctx = xmalloc(sizeof *ctx);
+        SaveCtx *ctx = cm_xmalloc(sizeof *ctx);
         ctx->p = p;
         ctx->then_quit = then_quit;
-        prompt_text("Filename: ", "", HIST_OPEN, saveas_done, NULL, ctx);
+        cm_prompt_text("Filename: ", "", HIST_OPEN, saveas_done, NULL, ctx);
         return 0;
     }
     (void)err;
@@ -1282,38 +1268,38 @@ int save_pane(Pane *p, int then_quit) {
 }
 
 static int a_save(Pane *p) {
-    if (!buf_modified(BUF) && *BUF->path && !BUF->is_new) {
+    if (!cm_buf_modified(BUF) && *BUF->path && !BUF->is_new) {
         /* micro saves anyway; keep it cheap but honest */
     }
-    save_pane(p, 0);
+    cm_save_pane(p, 0);
     return 1;
 }
 
 static int a_save_as(Pane *p) {
-    SaveCtx *ctx = xmalloc(sizeof *ctx);
+    SaveCtx *ctx = cm_xmalloc(sizeof *ctx);
     ctx->p = p;
     ctx->then_quit = 0;
-    prompt_text("Filename: ", "", HIST_OPEN, saveas_done, NULL, ctx);
+    cm_prompt_text("Filename: ", "", HIST_OPEN, saveas_done, NULL, ctx);
     return 1;
 }
 
 static void save_all_fn(Pane *p, void *data) {
     (void)data;
-    if (buf_modified(p->buf) && *p->buf->path) save_pane(p, 0);
+    if (cm_buf_modified(p->buf) && *p->buf->path) cm_save_pane(p, 0);
 }
 static int a_save_all(Pane *p) {
     (void)p;
-    editor_all_panes(save_all_fn, NULL);
+    cm_editor_all_panes(save_all_fn, NULL);
     return 1;
 }
 
 static void open_done(const char *resp, int canceled, void *data) {
     Pane *p = data;
     if (canceled || !resp) return;
-    command_run(p, resp);
+    cm_command_run(p, resp);
 }
 static int a_open_file(Pane *p) {
-    prompt_text("> ", "open ", HIST_COMMAND, open_done, NULL, p);
+    cm_prompt_text("> ", "open ", HIST_COMMAND, open_done, NULL, p);
     return 1;
 }
 
@@ -1323,7 +1309,7 @@ typedef struct {
     Pane *p;
     int regex;
     Loc origin;
-    int top, toprow, left;
+    int first_line, first_row, left;
     Cursor saved;
 } FindCtx;
 
@@ -1335,15 +1321,15 @@ static void find_changed(const char *resp, void *data) {
     if (!BOPT(p->buf, O_INCSEARCH)) return;
     if (!*resp) {
         *c = f->saved;
-        p->top = f->top;
-        p->toprow = f->toprow;
+        p->first_line = f->first_line;
+        p->first_row = f->first_row;
         return;
     }
-    if (search_find(p, resp, f->regex, f->origin, 1, &ms, &me, NULL)) {
+    if (cm_search_find(p, resp, f->regex, f->origin, 1, &ms, &me, NULL)) {
         c->sel[0] = c->orig[0] = ms;
         c->sel[1] = c->orig[1] = me;
         c->loc = me;
-        pane_relocate(p);
+        cm_pane_relocate(p);
     } else {
         *c = f->saved;
         c->sel[0] = c->sel[1] = c->loc;
@@ -1356,48 +1342,48 @@ static void find_done(const char *resp, int canceled, void *data) {
     Cursor *c = CUR;
     if (canceled || !resp || !*resp) {
         *c = f->saved;
-        p->top = f->top;
-        p->toprow = f->toprow;
+        p->first_line = f->first_line;
+        p->first_row = f->first_row;
         p->left = f->left;
         free(f);
         return;
     }
     free(p->buf->last_search);
-    p->buf->last_search = xstrdup(resp);
+    p->buf->last_search = cm_xstrdup(resp);
     p->buf->last_search_regex = f->regex;
     p->buf->hl_search = 1;
     {
         Loc ms, me;
         char *err = NULL;
-        if (search_find(p, resp, f->regex, f->origin, 1, &ms, &me, &err)) {
+        if (cm_search_find(p, resp, f->regex, f->origin, 1, &ms, &me, &err)) {
             c->sel[0] = c->orig[0] = ms;
             c->sel[1] = c->orig[1] = me;
             c->loc = me;
-            cur_store_vx(p, c);
-            pane_relocate(p);
+            cm_cur_store_vx(p, c);
+            cm_pane_relocate(p);
         } else if (err) {
             *c = f->saved;
-            editor_set_error("%s", err);
+            cm_editor_set_error("%s", err);
             free(err);
         } else {
             *c = f->saved;
-            editor_set_message("No matches found");
+            cm_editor_set_message("No matches found");
         }
     }
     free(f);
 }
 
 static int start_find(Pane *p, int regex) {
-    FindCtx *f = xcalloc(1, sizeof *f);
+    FindCtx *f = cm_xcalloc(1, sizeof *f);
     Cursor *c = CUR;
     f->p = p;
     f->regex = regex;
     f->saved = *c;
-    f->origin = cur_has_sel(c) ? c->sel[0] : c->loc;
-    f->top = p->top;
-    f->toprow = p->toprow;
+    f->origin = cm_cur_has_sel(c) ? c->sel[0] : c->loc;
+    f->first_line = p->first_line;
+    f->first_row = p->first_row;
     f->left = p->left;
-    prompt_text(regex ? "Find (regex): " : "Find (literal): ", "", HIST_FIND, find_done, find_changed, f);
+    cm_prompt_text(regex ? "Find (regex): " : "Find (literal): ", "", HIST_FIND, find_done, find_changed, f);
     return 1;
 }
 static int a_find(Pane *p) { return start_find(p, 1); }
@@ -1408,21 +1394,21 @@ static int a_diff_next(Pane *p) { (void)p; return 0; }
 static int a_diff_previous(Pane *p) { (void)p; return 0; }
 
 static int a_center(Pane *p) {
-    pane_center(p);
+    cm_pane_center(p);
     no_relocate = 1;
     return 1;
 }
 
 static int a_undo(Pane *p) {
-    if (buf_undo(BUF)) editor_set_message("Undid action");
-    pane_merge_cursors(p);
-    cur_store_vx(p, CUR);
+    if (cm_buf_undo(BUF)) cm_editor_set_message("Undid action");
+    cm_pane_merge_cursors(p);
+    cm_cur_store_vx(p, CUR);
     return 1;
 }
 static int a_redo(Pane *p) {
-    if (buf_redo(BUF)) editor_set_message("Redid action");
-    pane_merge_cursors(p);
-    cur_store_vx(p, CUR);
+    if (cm_buf_redo(BUF)) cm_editor_set_message("Redid action");
+    cm_pane_merge_cursors(p);
+    cm_cur_store_vx(p, CUR);
     return 1;
 }
 
@@ -1432,12 +1418,12 @@ static int a_copy(Pane *p) {
     Cursor *c = CUR;
     char *t;
     int len;
-    if (!cur_has_sel(c)) return 0;
+    if (!cm_cur_has_sel(c)) return 0;
     t = sel_text(p, c, &len);
-    clipboard_set(t, len, 0);
+    cm_clipboard_set(t, len, 0);
     free(t);
-    E.cut_line_streak = 0;
-    editor_set_message("Copied selection");
+    cm_E.cut_line_streak = 0;
+    cm_editor_set_message("Copied selection");
     return 1;
 }
 
@@ -1445,11 +1431,11 @@ static int a_copy(Pane *p) {
 static int select_lines(Pane *p, Cursor *c) {
     Buffer *b = BUF;
     int n;
-    if (cur_has_sel(c)) {
+    if (cm_cur_has_sel(c)) {
         Loc s0 = c->sel[0], e = c->sel[1];
-        if (e.x == 0) e = buf_move_chars(b, e, -1);
-        c->sel[0] = loc_make(0, s0.y);
-        c->sel[1] = e.y + 1 < b->nlines ? loc_make(0, e.y + 1) : buf_end(b);
+        if (e.x == 0) e = cm_buf_move_chars(b, e, -1);
+        c->sel[0] = cm_loc_make(0, s0.y);
+        c->sel[1] = e.y + 1 < b->nlines ? cm_loc_make(0, e.y + 1) : cm_buf_end(b);
         c->orig[0] = c->sel[0];
         c->orig[1] = c->sel[1];
         c->loc = c->sel[1];
@@ -1457,7 +1443,7 @@ static int select_lines(Pane *p, Cursor *c) {
         select_line_at(p, c);
     }
     n = c->sel[1].y - c->sel[0].y;
-    if (n == 0 && cur_has_sel(c)) n = 1;
+    if (n == 0 && cm_cur_has_sel(c)) n = 1;
     return n;
 }
 
@@ -1468,12 +1454,12 @@ static int a_copy_line(Pane *p) {
     int len, n = select_lines(p, c);
     if (n == 0) { *c = save; return 0; }
     t = sel_text(p, c, &len);
-    clipboard_set(t, len, 1);
+    cm_clipboard_set(t, len, 1);
     free(t);
     *c = save;
-    E.cut_line_streak = 0;
-    if (n > 1) editor_set_message("Copied %d lines", n);
-    else editor_set_message("Copied line");
+    cm_E.cut_line_streak = 0;
+    if (n > 1) cm_editor_set_message("Copied %d lines", n);
+    else cm_editor_set_message("Copied line");
     return 1;
 }
 
@@ -1481,74 +1467,74 @@ static int a_cut(Pane *p) {
     Cursor *c = CUR;
     char *t;
     int len;
-    if (!cur_has_sel(c)) return 0;
+    if (!cm_cur_has_sel(c)) return 0;
     if (readonly_check(p)) return 0;
     t = sel_text(p, c, &len);
-    clipboard_set(t, len, 0);
+    cm_clipboard_set(t, len, 0);
     free(t);
     delete_selection(p, c);
-    cur_store_vx(p, c);
-    E.cut_line_streak = 0;
-    editor_set_message("Cut selection");
+    cm_cur_store_vx(p, c);
+    cm_E.cut_line_streak = 0;
+    cm_editor_set_message("Cut selection");
     return 1;
 }
 
 static int a_cut_line(Pane *p) {
     Cursor *c = CUR;
     char *t;
-    int len, n, total;
+    int len, n, sum;
     if (readonly_check(p)) return 0;
     n = select_lines(p, c);
     if (n == 0) return 0;
-    total = n;
+    sum = n;
     t = sel_text(p, c, &len);
-    if (E.cut_line_streak && E.clipboard) {
-        char *cat = xmalloc((size_t)(E.clipboard_len + len + 1));
+    if (cm_E.cut_line_streak && cm_E.clipboard) {
+        char *cat = cm_xmalloc((size_t)(cm_E.clipboard_len + len + 1));
         int k;
-        memcpy(cat, E.clipboard, (size_t)E.clipboard_len);
-        memcpy(cat + E.clipboard_len, t, (size_t)len + 1);
-        for (k = 0; k < E.clipboard_len; k++) if (E.clipboard[k] == '\n') total++;
-        clipboard_set(cat, E.clipboard_len + len, 1);
+        memcpy(cat, cm_E.clipboard, (size_t)cm_E.clipboard_len);
+        memcpy(cat + cm_E.clipboard_len, t, (size_t)len + 1);
+        for (k = 0; k < cm_E.clipboard_len; k++) if (cm_E.clipboard[k] == '\n') sum++;
+        cm_clipboard_set(cat, cm_E.clipboard_len + len, 1);
         free(cat);
     } else {
-        clipboard_set(t, len, 1);
+        cm_clipboard_set(t, len, 1);
     }
     free(t);
-    E.cut_line_streak = 1;
+    cm_E.cut_line_streak = 1;
     delete_selection(p, c);
-    cur_store_vx(p, c);
-    if (total > 1) editor_set_message("Cut %d lines", total);
-    else editor_set_message("Cut line");
+    cm_cur_store_vx(p, c);
+    if (sum > 1) cm_editor_set_message("Cut %d lines", sum);
+    else cm_editor_set_message("Cut line");
     return 1;
 }
 
 static void paste_text(Pane *p, Cursor *c, const char *clip, int len) {
     Buffer *b = BUF;
-    char *txt = xstrndup(clip, (size_t)len);
+    char *txt = cm_xstrndup(clip, (size_t)len);
     int tl = len;
     if (BOPT(b, O_SMARTPASTE) && c->loc.x > 0 && memchr(txt, '\n', (size_t)tl)) {
         int pl = 0, wl;
         while (pl < tl && (txt[pl] == ' ' || txt[pl] == '\t')) pl++;
         if (!(pl == 1 && txt[0] == ' ')) {
-            char *pws = xstrndup(txt, (size_t)pl);
-            const char *lws = buf_leading_ws(b, c->loc.y, &wl);
-            char *needle = xsprintf("\n%s", pws);
+            char *pws = cm_xstrndup(txt, (size_t)pl);
+            const char *lws = cm_buf_leading_ws(b, c->loc.y, &wl);
+            char *needle = cm_xsprintf("\n%s", pws);
             if (strstr(txt, needle)) {
                 Str o;
                 char *s = txt + pl;
-                char *cws = xstrndup(lws, (size_t)wl);
-                str_init(&o);
-                str_reserve(&o, 0);
+                char *cws = cm_xstrndup(lws, (size_t)wl);
+                cm_str_init(&o);
+                cm_str_reserve(&o, 0);
                 for (;;) {
                     char *f = strstr(s, needle);
-                    if (!f) { str_puts(&o, s); break; }
-                    str_putn(&o, s, (int)(f - s));
-                    str_putc(&o, '\n');
-                    str_puts(&o, cws);
+                    if (!f) { cm_str_puts(&o, s); break; }
+                    cm_str_putn(&o, s, (int)(f - s));
+                    cm_str_putc(&o, '\n');
+                    cm_str_puts(&o, cws);
                     s = f + strlen(needle);
                 }
                 free(txt);
-                txt = str_detach(&o);
+                txt = cm_str_detach(&o);
                 tl = (int)strlen(txt);
                 free(cws);
             }
@@ -1556,18 +1542,18 @@ static void paste_text(Pane *p, Cursor *c, const char *clip, int len) {
             free(pws);
         }
     }
-    if (cur_has_sel(c)) delete_selection(p, c);
-    buf_insert(b, c->loc, txt, tl);
+    if (cm_cur_has_sel(c)) delete_selection(p, c);
+    cm_buf_insert(b, c->loc, txt, tl);
     free(txt);
-    cur_store_vx(p, c);
-    E.cut_line_streak = 0;
+    cm_cur_store_vx(p, c);
+    cm_E.cut_line_streak = 0;
 }
 
 static int a_paste(Pane *p) {
     int len;
     char *clip;
     if (readonly_check(p)) return 0;
-    clip = clipboard_get(&len);
+    clip = cm_clipboard_get(&len);
     if (p->ncur > 1) {
         /* if the clipboard has exactly one line per cursor, distribute them */
         int nl = 1, i;
@@ -1583,13 +1569,13 @@ static int a_paste(Pane *p) {
                 paste_text(p, CUR, s, l);
             }
             free(clip);
-            editor_set_message("Pasted clipboard");
+            cm_editor_set_message("Pasted clipboard");
             return 1;
         }
     }
     paste_text(p, CUR, clip, len);
     free(clip);
-    editor_set_message("Pasted clipboard");
+    cm_editor_set_message("Pasted clipboard");
     return 1;
 }
 
@@ -1599,12 +1585,12 @@ static int a_duplicate(Pane *p) {
     Cursor *c = CUR;
     char *t;
     int len;
-    if (!cur_has_sel(c)) return 0;
+    if (!cm_cur_has_sel(c)) return 0;
     if (readonly_check(p)) return 0;
     t = sel_text(p, c, &len);
-    buf_insert(BUF, c->sel[1], t, len);
+    cm_buf_insert(BUF, c->sel[1], t, len);
     free(t);
-    editor_set_message("Duplicated selection");
+    cm_editor_set_message("Duplicated selection");
     return 1;
 }
 
@@ -1613,29 +1599,29 @@ static int a_duplicate_line(Pane *p) {
     Buffer *b = BUF;
     char *t;
     if (readonly_check(p)) return 0;
-    if (cur_has_sel(c)) {
+    if (cm_cur_has_sel(c)) {
         Cursor save = *c;
         Loc s0 = c->sel[0], e = c->sel[1];
         int y;
-        if (e.x == 0) e = buf_move_chars(b, e, -1);
+        if (e.x == 0) e = cm_buf_move_chars(b, e, -1);
         c->sel[0] = c->sel[1] = c->orig[0] = c->orig[1] = c->loc;
-        c->loc = loc_make(b->lines[e.y].len, e.y);
+        c->loc = cm_loc_make(b->lines[e.y].len, e.y);
         for (y = s0.y; y <= e.y; y++) {
-            t = xsprintf("\n%s", b->lines[y].s);
-            buf_insert(b, c->loc, t, (int)strlen(t));
+            t = cm_xsprintf("\n%s", b->lines[y].s);
+            cm_buf_insert(b, c->loc, t, (int)strlen(t));
             free(t);
         }
         *c = save;
-        if (s0.y < e.y) editor_set_message("Duplicated %d lines", e.y - s0.y + 1);
-        else editor_set_message("Duplicated line");
+        if (s0.y < e.y) cm_editor_set_message("Duplicated %d lines", e.y - s0.y + 1);
+        else cm_editor_set_message("Duplicated line");
         return 1;
     }
     c->loc.x = b->lines[c->loc.y].len;
-    t = xsprintf("\n%s", b->lines[c->loc.y].s);
-    buf_insert(b, c->loc, t, (int)strlen(t));
+    t = cm_xsprintf("\n%s", b->lines[c->loc.y].s);
+    cm_buf_insert(b, c->loc, t, (int)strlen(t));
     free(t);
-    cur_store_vx(p, c);
-    editor_set_message("Duplicated line");
+    cm_cur_store_vx(p, c);
+    cm_editor_set_message("Duplicated line");
     return 1;
 }
 
@@ -1646,9 +1632,9 @@ static int a_delete_line(Pane *p) {
     n = select_lines(p, c);
     if (n == 0) return 0;
     delete_selection(p, c);
-    cur_store_vx(p, c);
-    if (n > 1) editor_set_message("Deleted %d lines", n);
-    else editor_set_message("Deleted line");
+    cm_cur_store_vx(p, c);
+    if (n > 1) cm_editor_set_message("Deleted %d lines", n);
+    else cm_editor_set_message("Deleted line");
     return 1;
 }
 
@@ -1661,38 +1647,38 @@ static int move_lines(Pane *p, int up) {
     if (readonly_check(p)) return 0;
     sel_line_range(p, c, &y0, &y1);
     if (up ? y0 == 0 : y1 >= b->nlines - 1) {
-        editor_set_message(up ? "Cannot move further up" : "Cannot move further down");
+        cm_editor_set_message(up ? "Cannot move further up" : "Cannot move further down");
         return 1;
     }
     save = *c;
     if (up) {
-        t = xstrdup(b->lines[y0 - 1].s);
+        t = cm_xstrdup(b->lines[y0 - 1].s);
         len = (int)strlen(t);
-        buf_remove(b, loc_make(0, y0 - 1), loc_make(0, y0));
+        cm_buf_remove(b, cm_loc_make(0, y0 - 1), cm_loc_make(0, y0));
         {
-            char *t2 = xsprintf("\n%s", t);
-            buf_insert(b, loc_make(b->lines[y1 - 1].len, y1 - 1), t2, len + 1);
+            char *t2 = cm_xsprintf("\n%s", t);
+            cm_buf_insert(b, cm_loc_make(b->lines[y1 - 1].len, y1 - 1), t2, len + 1);
             free(t2);
         }
         d = -1;
     } else {
-        t = xstrdup(b->lines[y1 + 1].s);
+        t = cm_xstrdup(b->lines[y1 + 1].s);
         len = (int)strlen(t);
-        buf_remove(b, loc_make(b->lines[y1].len, y1), loc_make(b->lines[y1 + 1].len, y1 + 1));
+        cm_buf_remove(b, cm_loc_make(b->lines[y1].len, y1), cm_loc_make(b->lines[y1 + 1].len, y1 + 1));
         {
-            char *t2 = xsprintf("%s\n", t);
-            buf_insert(b, loc_make(0, y0), t2, len + 1);
+            char *t2 = cm_xsprintf("%s\n", t);
+            cm_buf_insert(b, cm_loc_make(0, y0), t2, len + 1);
             free(t2);
         }
         d = 1;
     }
     free(t);
     *c = save;
-    c->loc = buf_clamp(b, loc_make(c->loc.x, c->loc.y + d));
-    c->sel[0] = buf_clamp(b, loc_make(c->sel[0].x, c->sel[0].y + d));
-    c->sel[1] = buf_clamp(b, loc_make(c->sel[1].x, c->sel[1].y + d));
-    c->orig[0] = buf_clamp(b, loc_make(c->orig[0].x, c->orig[0].y + d));
-    c->orig[1] = buf_clamp(b, loc_make(c->orig[1].x, c->orig[1].y + d));
+    c->loc = cm_buf_clamp(b, cm_loc_make(c->loc.x, c->loc.y + d));
+    c->sel[0] = cm_buf_clamp(b, cm_loc_make(c->sel[0].x, c->sel[0].y + d));
+    c->sel[1] = cm_buf_clamp(b, cm_loc_make(c->sel[1].x, c->sel[1].y + d));
+    c->orig[0] = cm_buf_clamp(b, cm_loc_make(c->orig[0].x, c->orig[0].y + d));
+    c->orig[1] = cm_buf_clamp(b, cm_loc_make(c->orig[1].x, c->orig[1].y + d));
     return 1;
 }
 static int a_move_lines_up(Pane *p) { return move_lines(p, 1); }
@@ -1700,88 +1686,88 @@ static int a_move_lines_down(Pane *p) { return move_lines(p, 0); }
 
 static int a_select_all(Pane *p) {
     Cursor *c = CUR;
-    c->sel[0] = c->orig[0] = loc_make(0, 0);
-    c->sel[1] = c->orig[1] = buf_end(BUF);
+    c->sel[0] = c->orig[0] = cm_loc_make(0, 0);
+    c->sel[1] = c->orig[1] = cm_buf_end(BUF);
     c->loc = c->sel[1];
-    cur_store_vx(p, c);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 
-static int a_start(Pane *p) { p->top = 0; p->toprow = 0; no_relocate = 1; return 1; }
+static int a_start(Pane *p) { p->first_line = 0; p->first_row = 0; no_relocate = 1; return 1; }
 static int a_end(Pane *p) {
-    pane_scroll(p, BUF->nlines * 4 + 1000);
+    cm_pane_scroll(p, BUF->nlines * 4 + 1000);
     no_relocate = 1;
     return 1;
 }
-static int a_page_up(Pane *p) { pane_scroll(p, -page_size(p)); no_relocate = 1; return 1; }
-static int a_page_down(Pane *p) { pane_scroll(p, page_size(p)); no_relocate = 1; return 1; }
-static int a_half_page_up(Pane *p) { pane_scroll(p, -pane_text_height(p) / 2); no_relocate = 1; return 1; }
-static int a_half_page_down(Pane *p) { pane_scroll(p, pane_text_height(p) / 2); no_relocate = 1; return 1; }
+static int a_page_up(Pane *p) { cm_pane_scroll(p, -page_size(p)); no_relocate = 1; return 1; }
+static int a_page_down(Pane *p) { cm_pane_scroll(p, page_size(p)); no_relocate = 1; return 1; }
+static int a_half_page_up(Pane *p) { cm_pane_scroll(p, -cm_pane_text_height(p) / 2); no_relocate = 1; return 1; }
+static int a_half_page_down(Pane *p) { cm_pane_scroll(p, cm_pane_text_height(p) / 2); no_relocate = 1; return 1; }
 static int a_select_page_up(Pane *p) {
     Cursor *c = CUR;
     begin_select(c);
-    cur_up(p, c, page_size(p));
+    cm_cur_up(p, c, page_size(p));
     select_to(p, c, c->loc);
     return 1;
 }
 static int a_select_page_down(Pane *p) {
     Cursor *c = CUR;
     begin_select(c);
-    cur_down(p, c, page_size(p));
+    cm_cur_down(p, c, page_size(p));
     select_to(p, c, c->loc);
     return 1;
 }
 static int a_start_of_text(Pane *p) {
     Cursor *c = CUR;
-    cur_deselect(c, 1);
+    cm_cur_deselect(c, 1);
     c->loc.x = start_of_text_x(p, c->loc.y);
-    cur_store_vx(p, c);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 static int a_start_of_text_toggle(Pane *p) {
     Cursor *c = CUR;
     int st;
-    cur_deselect(c, 1);
+    cm_cur_deselect(c, 1);
     st = start_of_text_x(p, c->loc.y);
     c->loc.x = c->loc.x == st ? 0 : st;
-    cur_store_vx(p, c);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 static int a_start_of_line(Pane *p) {
     Cursor *c = CUR;
-    cur_deselect(c, 1);
+    cm_cur_deselect(c, 1);
     c->loc.x = 0;
-    cur_store_vx(p, c);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 static int a_end_of_line(Pane *p) {
     Cursor *c = CUR;
-    cur_deselect(c, 1);
+    cm_cur_deselect(c, 1);
     c->loc.x = BUF->lines[c->loc.y].len;
-    cur_store_vx(p, c);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 
 static int a_toggle_help(Pane *p) {
-    if (p->buf->type == BT_HELP) editor_quit_pane(p, 1);
-    else help_open(p, "help");
+    if (p->buf->type == BT_HELP) cm_editor_quit_pane(p, 1);
+    else cm_help_open(p, "help");
     return 1;
 }
 static int a_toggle_keymenu(Pane *p) {
     (void)p;
     GOPT(O_KEYMENU) = !GOPT(O_KEYMENU);
-    editor_layout();
+    cm_editor_layout();
     return 1;
 }
 static int a_toggle_diff_gutter(Pane *p) {
     BOPT(BUF, O_DIFFGUTTER) = !BOPT(BUF, O_DIFFGUTTER);
-    editor_set_message(BOPT(BUF, O_DIFFGUTTER) ? "Enabled diff gutter" : "Disabled diff gutter");
+    cm_editor_set_message(BOPT(BUF, O_DIFFGUTTER) ? "Enabled diff gutter" : "Disabled diff gutter");
     return 1;
 }
 static int a_toggle_ruler(Pane *p) {
     BOPT(BUF, O_RULER) = !BOPT(BUF, O_RULER);
     BUF->local[O_RULER] = 1;
-    editor_set_message(BOPT(BUF, O_RULER) ? "Enabled ruler" : "Disabled ruler");
+    cm_editor_set_message(BOPT(BUF, O_RULER) ? "Enabled ruler" : "Disabled ruler");
     return 1;
 }
 static int a_toggle_highlight_search(Pane *p) {
@@ -1800,107 +1786,106 @@ static int a_reset_search(Pane *p) {
     BUF->hl_search = 0;
     return 1;
 }
-static int a_clear_status(Pane *p) { (void)p; editor_clear_message(); return 1; }
+static int a_clear_status(Pane *p) { (void)p; cm_editor_clear_message(); return 1; }
 
-void run_shell_interactive(const char *cmd);
 
 static void shellmode_done(const char *resp, int canceled, void *data) {
     (void)data;
     if (canceled || !resp || !*resp) return;
-    run_shell_interactive(resp);
+    cm_run_shell_interactive(resp);
 }
 
 static int a_shell_mode(Pane *p) {
     (void)p;
-    prompt_text("$ ", "", HIST_SHELL, shellmode_done, NULL, NULL);
+    cm_prompt_text("$ ", "", HIST_SHELL, shellmode_done, NULL, NULL);
     return 1;
 }
 
 static void command_done(const char *resp, int canceled, void *data) {
     (void)data;
     if (canceled || !resp) return;
-    command_run(cur_pane(), resp);
+    cm_command_run(cm_cur_pane(), resp);
 }
 static int a_command_mode(Pane *p) {
     (void)p;
-    prompt_text("> ", "", HIST_COMMAND, command_done, NULL, NULL);
+    cm_prompt_text("> ", "", HIST_COMMAND, command_done, NULL, NULL);
     return 1;
 }
 static int a_toggle_overwrite(Pane *p) { p->overwrite = !p->overwrite; return 1; }
 static int a_escape(Pane *p) { (void)p; ac_clear(); return 1; }
 
-static void quit_after_save(Pane *p) { editor_quit_pane(p, 1); }
+static void quit_after_save(Pane *p) { cm_editor_quit_pane(p, 1); }
 
 static void quit_yn(int yes, int canceled, void *data) {
     Pane *p = data;
     if (canceled) return;
     if (yes) {
-        if (save_pane(p, 1)) editor_quit_pane(p, 1);
+        if (cm_save_pane(p, 1)) cm_editor_quit_pane(p, 1);
     } else {
-        editor_quit_pane(p, 1);
+        cm_editor_quit_pane(p, 1);
     }
 }
 
 static int a_quit(Pane *p) {
     Buffer *b = BUF;
-    if (buf_modified(b) && b->refs <= 1) {
-        char *msg = xsprintf("Save changes to %s before closing? (y,n,esc)",
+    if (cm_buf_modified(b) && b->refs <= 1) {
+        char *msg = cm_xsprintf("Save changes to %s before closing? (y,n,esc)",
                              *b->name ? b->name : "No name");
-        prompt_yn(msg, quit_yn, p);
+        cm_prompt_yn(msg, quit_yn, p);
         free(msg);
         return 1;
     }
-    editor_quit_pane(p, 1);
+    cm_editor_quit_pane(p, 1);
     return 1;
 }
 
 static void any_modified_fn(Pane *p, void *data) {
-    if (buf_modified(p->buf)) *(int *)data = 1;
+    if (cm_buf_modified(p->buf)) *(int *)data = 1;
 }
 static void quitall_yn(int yes, int canceled, void *data) {
     (void)data;
-    if (!canceled && yes) E.quit = 1;
+    if (!canceled && yes) cm_E.quit = 1;
 }
 static int a_quit_all(Pane *p) {
     int any = 0;
     (void)p;
-    editor_all_panes(any_modified_fn, &any);
-    if (any) prompt_yn("Quit micro? (all open buffers will be closed without saving) (y,n,esc)", quitall_yn, NULL);
-    else E.quit = 1;
+    cm_editor_all_panes(any_modified_fn, &any);
+    if (any) cm_prompt_yn("Quit micro? (all open buffers will be closed without saving) (y,n,esc)", quitall_yn, NULL);
+    else cm_E.quit = 1;
     return 1;
 }
-static int a_force_quit(Pane *p) { editor_quit_pane(p, 1); return 1; }
+static int a_force_quit(Pane *p) { cm_editor_quit_pane(p, 1); return 1; }
 
 static int a_add_tab(Pane *p) {
     (void)p;
-    editor_add_tab(pane_new(buf_new_empty()));
+    cm_editor_add_tab(cm_pane_new(cm_buf_new_empty()));
     return 1;
 }
 static int a_previous_tab(Pane *p) {
     (void)p;
-    if (E.curtab == 0) return 0;
-    E.curtab--;
-    editor_layout();
+    if (cm_E.curtab == 0) return 0;
+    cm_E.curtab--;
+    cm_editor_layout();
     return 1;
 }
 static int a_next_tab(Pane *p) {
     (void)p;
-    if (E.curtab >= E.ntabs - 1) return 0;
-    E.curtab++;
-    editor_layout();
+    if (cm_E.curtab >= cm_E.ntabs - 1) return 0;
+    cm_E.curtab++;
+    cm_editor_layout();
     return 1;
 }
-static int a_first_tab(Pane *p) { (void)p; E.curtab = 0; editor_layout(); return 1; }
-static int a_last_tab(Pane *p) { (void)p; E.curtab = E.ntabs - 1; editor_layout(); return 1; }
+static int a_first_tab(Pane *p) { (void)p; cm_E.curtab = 0; cm_editor_layout(); return 1; }
+static int a_last_tab(Pane *p) { (void)p; cm_E.curtab = cm_E.ntabs - 1; cm_editor_layout(); return 1; }
 
 static int split_index(Tab *t, Pane *p, Pane ***arr, int *n) {
     int i;
-    *arr = tab_panes(t, n);
+    *arr = cm_tab_panes(t, n);
     for (i = 0; i < *n; i++) if ((*arr)[i] == p) return i;
     return 0;
 }
 static int a_next_split(Pane *p) {
-    Tab *t = cur_tab();
+    Tab *t = cm_cur_tab();
     Pane **a;
     int n, i = split_index(t, p, &a, &n);
     if (i >= n - 1) { free(a); return 0; }
@@ -1909,7 +1894,7 @@ static int a_next_split(Pane *p) {
     return 1;
 }
 static int a_previous_split(Pane *p) {
-    Tab *t = cur_tab();
+    Tab *t = cm_cur_tab();
     Pane **a;
     int n, i = split_index(t, p, &a, &n);
     if (i == 0) { free(a); return 0; }
@@ -1918,7 +1903,7 @@ static int a_previous_split(Pane *p) {
     return 1;
 }
 static int a_first_split(Pane *p) {
-    Tab *t = cur_tab();
+    Tab *t = cm_cur_tab();
     Pane **a;
     int n;
     split_index(t, p, &a, &n);
@@ -1927,7 +1912,7 @@ static int a_first_split(Pane *p) {
     return 1;
 }
 static int a_last_split(Pane *p) {
-    Tab *t = cur_tab();
+    Tab *t = cm_cur_tab();
     Pane **a;
     int n;
     split_index(t, p, &a, &n);
@@ -1936,72 +1921,68 @@ static int a_last_split(Pane *p) {
     return 1;
 }
 static int a_unsplit(Pane *p) {
-    if (tab_npanes(cur_tab()) <= 1) return 0;
+    if (cm_tab_npanes(cm_cur_tab()) <= 1) return 0;
     return a_quit(p);
 }
 static int a_vsplit(Pane *p) {
-    tab_split(cur_tab(), p, buf_new_empty(), 1);
-    editor_layout();
+    cm_tab_split(cm_cur_tab(), p, cm_buf_new_empty(), 1);
+    cm_editor_layout();
     return 1;
 }
 static int a_hsplit(Pane *p) {
-    tab_split(cur_tab(), p, buf_new_empty(), 0);
-    editor_layout();
+    cm_tab_split(cm_cur_tab(), p, cm_buf_new_empty(), 0);
+    cm_editor_layout();
     return 1;
 }
 
 static int a_toggle_macro(Pane *p) {
     int i;
     (void)p;
-    E.recording_macro = !E.recording_macro;
-    if (E.recording_macro) {
-        for (i = 0; i < E.nmacro; i++) free(E.macro[i].s);
-        E.nmacro = 0;
-        editor_set_message("Recording");
+    cm_E.recording_macro = !cm_E.recording_macro;
+    if (cm_E.recording_macro) {
+        for (i = 0; i < cm_E.nmacro; i++) free(cm_E.macro[i].s);
+        cm_E.nmacro = 0;
+        cm_editor_set_message("Recording");
     } else {
-        editor_set_message("Stopped recording");
+        cm_editor_set_message("Stopped recording");
     }
     return 1;
 }
 
 static int a_play_macro(Pane *p) {
     int i;
-    if (E.recording_macro) return 0;
-    E.playing_macro = 1;
-    for (i = 0; i < E.nmacro; i++) {
-        MacroItem *m = &E.macro[i];
-        Pane *cp = cur_pane();
-        if (prompt_active()) break; /* never run recorded actions under a prompt */
-        if (m->kind == 0) run_action_string(cp, m->s, NULL);
-        else if (m->kind == 1) insert_rune(cp, m->rune);
-        else insert_text(cp, m->s, m->len, 1);
+    if (cm_E.recording_macro) return 0;
+    cm_E.playing_macro = 1;
+    for (i = 0; i < cm_E.nmacro; i++) {
+        MacroItem *m = &cm_E.macro[i];
+        Pane *cp = cm_cur_pane();
+        if (cm_prompt_active()) break; /* never run recorded actions under a prompt */
+        if (m->kind == 0) cm_run_action_string(cp, m->s, NULL);
+        else if (m->kind == 1) cm_insert_rune(cp, m->rune);
+        else cm_insert_text(cp, m->s, m->len, 1);
     }
-    E.playing_macro = 0;
+    cm_E.playing_macro = 0;
     (void)p;
     return 1;
 }
 
 static int a_suspend(Pane *p) {
     (void)p;
-    if (!plat_can_suspend()) {
-        editor_set_message("Suspend is not supported on this platform");
-        return 0;
-    }
-    scr_fini();
-    plat_suspend();
-    scr_init();
-    scr_set_mouse(GOPT(O_MOUSE));
-    scr_invalidate();
+    cm_scr_fini();
+    cm_plat_suspend();
+    cm_scr_init();
+    cm_scr_set_mouse(GOPT(O_MOUSE));
+    cm_scr_invalidate();
     return 1;
 }
 
 static int a_scroll_up(Pane *p) {
-    pane_scroll(p, -BOPT(BUF, O_SCROLLSPEED));
+    cm_pane_scroll(p, -BOPT(BUF, O_SCROLLSPEED));
     no_relocate = 1;
     return 1;
 }
 static int a_scroll_down(Pane *p) {
-    pane_scroll(p, BOPT(BUF, O_SCROLLSPEED));
+    cm_pane_scroll(p, BOPT(BUF, O_SCROLLSPEED));
     no_relocate = 1;
     return 1;
 }
@@ -2014,24 +1995,24 @@ static int a_spawn_multi_cursor(Pane *p) {
     int len;
     Loc ms, me;
     char *err = NULL;
-    if (!cur_has_sel(sp)) {
+    if (!cm_cur_has_sel(sp)) {
         select_word_at(p, sp);
         p->multi_word = 1;
         return 1;
     }
     sel = sel_text(p, sp, &len);
-    q = re_quote(sel);
-    pat = p->multi_word ? xsprintf("\\b%s\\b", q) : xstrdup(q);
-    if (search_find(p, pat, 1, sp->sel[1], 1, &ms, &me, &err)) {
-        int i = pane_add_cursor(p, me);
+    q = cm_re_quote(sel);
+    pat = p->multi_word ? cm_xsprintf("\\b%s\\b", q) : cm_xstrdup(q);
+    if (cm_search_find(p, pat, 1, sp->sel[1], 1, &ms, &me, &err)) {
+        int i = cm_pane_add_cursor(p, me);
         Cursor *c = &p->cur[i];
         c->sel[0] = c->orig[0] = ms;
         c->sel[1] = c->orig[1] = me;
         c->loc = me;
         p->active = i;
-        pane_merge_cursors(p);
+        cm_pane_merge_cursors(p);
     } else {
-        editor_set_message("No matches found");
+        cm_editor_set_message("No matches found");
     }
     free(err);
     free(sel);
@@ -2043,18 +2024,18 @@ static int a_spawn_multi_cursor(Pane *p) {
 static int a_spawn_multi_cursor_select(Pane *p) {
     Cursor *c = CUR;
     int y0, y1, y;
-    if (!cur_has_sel(c)) return 0;
+    if (!cm_cur_has_sel(c)) return 0;
     y0 = c->sel[0].y;
     y1 = c->sel[1].y;
     if (y0 == y1) return 0;
-    pane_reset_cursors(p);
-    p->cur[0].loc = loc_make(0, y0);
-    cur_deselect(&p->cur[0], 1);
-    p->cur[0].loc = loc_make(0, y0);
+    cm_pane_reset_cursors(p);
+    p->cur[0].loc = cm_loc_make(0, y0);
+    cm_cur_deselect(&p->cur[0], 1);
+    p->cur[0].loc = cm_loc_make(0, y0);
     p->cur[0].sel[0] = p->cur[0].sel[1] = p->cur[0].orig[0] = p->cur[0].orig[1] = p->cur[0].loc;
-    for (y = y0 + 1; y <= y1; y++) pane_add_cursor(p, loc_make(0, y));
+    for (y = y0 + 1; y <= y1; y++) cm_pane_add_cursor(p, cm_loc_make(0, y));
     p->active = p->ncur - 1;
-    editor_set_message("Added cursors from selection");
+    cm_editor_set_message("Added cursors from selection");
     return 1;
 }
 
@@ -2064,28 +2045,28 @@ static int spawn_vertical(Pane *p, int dir) {
     int i;
     if (dir < 0) {
         if (tmp.loc.y == 0) return 0;
-        cur_up(p, &tmp, 1);
+        cm_cur_up(p, &tmp, 1);
     } else {
         if (tmp.loc.y >= p->buf->nlines - 1) return 0;
-        cur_down(p, &tmp, 1);
+        cm_cur_down(p, &tmp, 1);
     }
-    i = pane_add_cursor(p, tmp.loc); /* may realloc p->cur: don't touch `last` after */
+    i = cm_pane_add_cursor(p, tmp.loc); /* may realloc p->cur: don't touch `last` after */
     p->cur[i].lastvx = tmp.lastvx;
     p->active = i;
-    pane_merge_cursors(p);
+    cm_pane_merge_cursors(p);
     return 1;
 }
 static int a_spawn_multi_cursor_up(Pane *p) { return spawn_vertical(p, -1); }
 static int a_spawn_multi_cursor_down(Pane *p) { return spawn_vertical(p, 1); }
 
 static int a_remove_multi_cursor(Pane *p) {
-    if (p->ncur > 1) pane_remove_cursor(p, p->ncur - 1);
+    if (p->ncur > 1) cm_pane_remove_cursor(p, p->ncur - 1);
     else p->multi_word = 0;
     p->active = p->ncur - 1;
     return 1;
 }
 static int a_remove_all_multi_cursors(Pane *p) {
-    pane_reset_cursors(p);
+    cm_pane_reset_cursors(p);
     p->multi_word = 0;
     return 1;
 }
@@ -2094,16 +2075,16 @@ static int a_skip_multi_cursor(Pane *p) {
     char *sel, *q, *pat;
     int len;
     Loc ms, me;
-    if (!cur_has_sel(last)) return 1;
+    if (!cm_cur_has_sel(last)) return 1;
     sel = sel_text(p, last, &len);
-    q = re_quote(sel);
-    pat = p->multi_word ? xsprintf("\\b%s\\b", q) : xstrdup(q);
-    if (search_find(p, pat, 1, last->sel[1], 1, &ms, &me, NULL)) {
+    q = cm_re_quote(sel);
+    pat = p->multi_word ? cm_xsprintf("\\b%s\\b", q) : cm_xstrdup(q);
+    if (cm_search_find(p, pat, 1, last->sel[1], 1, &ms, &me, NULL)) {
         last->sel[0] = last->orig[0] = ms;
         last->sel[1] = last->orig[1] = me;
         last->loc = me;
-        pane_merge_cursors(p);
-    } else editor_set_message("No matches found");
+        cm_pane_merge_cursors(p);
+    } else cm_editor_set_message("No matches found");
     free(sel);
     free(q);
     free(pat);
@@ -2114,16 +2095,16 @@ static int a_skip_multi_cursor_back(Pane *p) {
     char *sel, *q, *pat;
     int len;
     Loc ms, me;
-    if (!cur_has_sel(last)) return 1;
+    if (!cm_cur_has_sel(last)) return 1;
     sel = sel_text(p, last, &len);
-    q = re_quote(sel);
-    pat = p->multi_word ? xsprintf("\\b%s\\b", q) : xstrdup(q);
-    if (search_find(p, pat, 1, last->sel[0], 0, &ms, &me, NULL)) {
+    q = cm_re_quote(sel);
+    pat = p->multi_word ? cm_xsprintf("\\b%s\\b", q) : cm_xstrdup(q);
+    if (cm_search_find(p, pat, 1, last->sel[0], 0, &ms, &me, NULL)) {
         last->sel[0] = last->orig[0] = ms;
         last->sel[1] = last->orig[1] = me;
         last->loc = me;
-        pane_merge_cursors(p);
-    } else editor_set_message("No matches found");
+        cm_pane_merge_cursors(p);
+    } else cm_editor_set_message("No matches found");
     free(sel);
     free(q);
     free(pat);
@@ -2133,12 +2114,12 @@ static int a_skip_multi_cursor_back(Pane *p) {
 static int a_jump_to_matching_brace(Pane *p) {
     Loc br, m;
     Cursor *c = CUR;
-    if (!find_matching_brace(BUF, c->loc, 1, &br, &m)) return 0;
+    if (!cm_find_matching_brace(BUF, c->loc, 1, &br, &m)) return 0;
     /* brace under the cursor: jump past its match; brace left of it: onto the match */
-    if (loc_cmp(br, c->loc) == 0) c->loc = buf_move_chars(BUF, m, 1);
+    if (cm_loc_cmp(br, c->loc) == 0) c->loc = cm_buf_move_chars(BUF, m, 1);
     else c->loc = m;
     c->sel[0] = c->sel[1] = c->orig[0] = c->orig[1] = c->loc;
-    cur_store_vx(p, c);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 
@@ -2146,14 +2127,14 @@ static void jumpline_done(const char *resp, int canceled, void *data) {
     (void)data;
     if (canceled || !resp) return;
     {
-        char *cmd = xsprintf("goto %s", resp);
-        command_run(cur_pane(), cmd);
+        char *cmd = cm_xsprintf("goto %s", resp);
+        cm_command_run(cm_cur_pane(), cmd);
         free(cmd);
     }
 }
 static int a_jump_line(Pane *p) {
     (void)p;
-    prompt_text("Jump to line:col: ", "", HIST_GOTO, jumpline_done, NULL, NULL);
+    cm_prompt_text("Jump to line:col: ", "", HIST_GOTO, jumpline_done, NULL, NULL);
     return 1;
 }
 static int a_deselect(Pane *p) {
@@ -2164,31 +2145,31 @@ static int a_deselect(Pane *p) {
     }
     return 1;
 }
-static int a_clear_info(Pane *p) { (void)p; editor_clear_message(); return 1; }
+static int a_clear_info(Pane *p) { (void)p; cm_editor_clear_message(); return 1; }
 
 /* ---- mouse ---- */
 
 static Pane *mouse_pane(Pane *p) {
-    InEvent *ev = E.cur_event;
+    InEvent *ev = cm_E.cur_event;
     Pane *mp;
     if (!ev) return p;
-    mp = tab_pane_at(cur_tab(), ev->mx, ev->my);
-    if (mp && mp != p) cur_tab()->active = mp;
+    mp = cm_tab_pane_at(cm_cur_tab(), ev->mx, ev->my);
+    if (mp && mp != p) cm_cur_tab()->active = mp;
     return mp ? mp : p;
 }
 
 static int a_mouse_press(Pane *p) {
-    InEvent *ev = E.cur_event;
+    InEvent *ev = cm_E.cur_event;
     Cursor *c;
     Loc l;
-    long long now = plat_now_ms();
+    p_s64 now = cm_plat_now_ms();
     if (!ev) return 0;
     p = mouse_pane(p);
-    if (ev->my >= p->y + pane_text_height(p)) return 1; /* status line */
-    pane_screen_to_loc(p, ev->mx, ev->my, &l);
-    pane_reset_cursors(p);
+    if (ev->my >= p->y + cm_pane_text_height(p)) return 1; /* status line */
+    cm_pane_screen_to_loc(p, ev->mx, ev->my, &l);
+    cm_pane_reset_cursors(p);
     c = CUR;
-    if (now - p->last_click < 400 && loc_cmp(l, p->click_loc) == 0) {
+    if (now - p->last_click < 400 && cm_loc_cmp(l, p->click_loc) == 0) {
         p->clicks = p->clicks % 3 + 1;
     } else {
         p->clicks = 1;
@@ -2205,7 +2186,7 @@ static int a_mouse_press(Pane *p) {
     } else {
         if (ev->mods & MOD_SHIFT) {
             begin_select(c);
-            if (!cur_has_sel(c)) c->orig[0] = c->orig[1] = c->sel[0];
+            if (!cm_cur_has_sel(c)) c->orig[0] = c->orig[1] = c->sel[0];
             select_to(p, c, l);
         } else {
             c->sel[0] = c->sel[1] = c->orig[0] = c->orig[1] = l;
@@ -2213,32 +2194,32 @@ static int a_mouse_press(Pane *p) {
         p->drag_mode = DRAG_CHAR;
     }
     p->dragging = 1;
-    cur_store_vx(p, c);
+    cm_cur_store_vx(p, c);
     return 1;
 }
 
 static int a_mouse_drag(Pane *p) {
-    InEvent *ev = E.cur_event;
+    InEvent *ev = cm_E.cur_event;
     Cursor *c = CUR;
     Loc l;
     if (!ev || !p->dragging) return 0;
-    pane_screen_to_loc(p, ev->mx, ev->my, &l);
+    cm_pane_screen_to_loc(p, ev->mx, ev->my, &l);
     if (p->drag_mode == DRAG_WORD) {
         Cursor t = *c;
         t.loc = l;
         select_word_at(p, &t);
-        if (loc_cmp(l, c->orig[0]) < 0) l = t.sel[0];
+        if (cm_loc_cmp(l, c->orig[0]) < 0) l = t.sel[0];
         else l = t.sel[1];
     } else if (p->drag_mode == DRAG_LINE) {
-        if (loc_cmp(l, c->orig[0]) < 0) l = loc_make(0, l.y);
-        else l = l.y + 1 < BUF->nlines ? loc_make(0, l.y + 1) : loc_make(BUF->lines[l.y].len, l.y);
+        if (cm_loc_cmp(l, c->orig[0]) < 0) l = cm_loc_make(0, l.y);
+        else l = l.y + 1 < BUF->nlines ? cm_loc_make(0, l.y + 1) : cm_loc_make(BUF->lines[l.y].len, l.y);
     }
     c->loc = l;
     select_to(p, c, l);
-    cur_store_vx(p, c);
+    cm_cur_store_vx(p, c);
     /* scroll if dragging past edges */
-    if (ev->my < p->y) pane_scroll(p, -1);
-    else if (ev->my >= p->y + pane_text_height(p)) pane_scroll(p, 1);
+    if (ev->my < p->y) cm_pane_scroll(p, -1);
+    else if (ev->my >= p->y + cm_pane_text_height(p)) cm_pane_scroll(p, 1);
     return 1;
 }
 
@@ -2248,19 +2229,19 @@ static int a_mouse_release(Pane *p) {
 }
 
 static int a_mouse_multi_cursor(Pane *p) {
-    InEvent *ev = E.cur_event;
+    InEvent *ev = cm_E.cur_event;
     Loc l;
     int i;
     if (!ev) return 0;
     p = mouse_pane(p);
-    pane_screen_to_loc(p, ev->mx, ev->my, &l);
+    cm_pane_screen_to_loc(p, ev->mx, ev->my, &l);
     for (i = 0; i < p->ncur; i++) {
-        if (loc_cmp(p->cur[i].loc, l) == 0 && p->ncur > 1) {
-            pane_remove_cursor(p, i);
+        if (cm_loc_cmp(p->cur[i].loc, l) == 0 && p->ncur > 1) {
+            cm_pane_remove_cursor(p, i);
             return 1;
         }
     }
-    i = pane_add_cursor(p, l);
+    i = cm_pane_add_cursor(p, l);
     p->active = i;
     return 1;
 }
@@ -2299,19 +2280,19 @@ static int a_comment(Pane *p) {
     Cursor *c = CUR;
     const char *fmt = comment_fmt(b);
     const char *ps = strstr(fmt, "%s");
-    char *pre = xstrndup(fmt, (size_t)(ps - fmt)); /* e.g. "// " */
+    char *pre = cm_xstrndup(fmt, (size_t)(ps - fmt)); /* e.g. "// " */
     const char *post = ps + 2;                     /* text after the comment body */
-    int y0, y1, y, all = 1, minind = 1 << 30, any = 0;
+    int y0, y1, y, all = 1, minind = INT_MAX, any = 0;
     char *pre_t;
     size_t pl, ptl = strlen(post);
     if (readonly_check(p)) { free(pre); return 0; }
     sel_line_range(p, c, &y0, &y1);
-    pre_t = xstrdup(pre);
+    pre_t = cm_xstrdup(pre);
     pl = strlen(pre_t);
     while (pl > 0 && pre_t[pl - 1] == ' ') pre_t[--pl] = 0; /* "//" */
     for (y = y0; y <= y1; y++) {
         int wl;
-        const char *s = buf_leading_ws(b, y, &wl);
+        const char *s = cm_buf_leading_ws(b, y, &wl);
         if (wl == b->lines[y].len) continue;
         any = 1;
         if (wl < minind) minind = wl;
@@ -2320,7 +2301,7 @@ static int a_comment(Pane *p) {
     if (!any) { free(pre); free(pre_t); return 1; }
     for (y = y0; y <= y1; y++) {
         int wl;
-        const char *s = buf_leading_ws(b, y, &wl);
+        const char *s = cm_buf_leading_ws(b, y, &wl);
         if (wl == b->lines[y].len) continue;
         if (all) {
             /* uncomment */
@@ -2331,24 +2312,24 @@ static int a_comment(Pane *p) {
                 const char *ln = b->lines[y].s;
                 size_t pt2 = ptl;
                 if (len >= (int)ptl && !strncmp(ln + len - ptl, post, ptl)) {
-                    buf_remove(b, loc_make(len - (int)pt2, y), loc_make(len, y));
+                    cm_buf_remove(b, cm_loc_make(len - (int)pt2, y), cm_loc_make(len, y));
                 } else {
                     const char *post_t = post;
                     while (*post_t == ' ') post_t++;
                     pt2 = strlen(post_t);
                     if (len >= (int)pt2 && !strncmp(ln + len - pt2, post_t, pt2))
-                        buf_remove(b, loc_make(len - (int)pt2, y), loc_make(len, y));
+                        cm_buf_remove(b, cm_loc_make(len - (int)pt2, y), cm_loc_make(len, y));
                 }
             }
-            buf_remove(b, loc_make(wl, y), loc_make(wl + rm, y));
+            cm_buf_remove(b, cm_loc_make(wl, y), cm_loc_make(wl + rm, y));
         } else {
-            if (ptl > 0) buf_insert(b, loc_make(b->lines[y].len, y), post, (int)ptl);
-            buf_insert(b, loc_make(minind, y), pre, (int)strlen(pre));
+            if (ptl > 0) cm_buf_insert(b, cm_loc_make(b->lines[y].len, y), post, (int)ptl);
+            cm_buf_insert(b, cm_loc_make(minind, y), pre, (int)strlen(pre));
         }
     }
     free(pre);
     free(pre_t);
-    if (!cur_has_sel(c)) cur_store_vx(p, c);
+    if (!cm_cur_has_sel(c)) cm_cur_store_vx(p, c);
     return 1;
 }
 
@@ -2431,21 +2412,21 @@ static const ActionDef actions[] = {
 
 #define NACTIONS ((int)(sizeof actions / sizeof actions[0]))
 
-ActionFn action_find(const char *name) {
+ActionFn cm_action_find(const char *name) {
     int i;
     for (i = 0; i < NACTIONS; i++)
         if (!strcmp(actions[i].name, name)) return actions[i].fn;
     return NULL;
 }
 
-int action_is_multi(const char *name) {
+int cm_action_is_multi(const char *name) {
     int i;
     for (i = 0; i < NACTIONS; i++)
         if (!strcmp(actions[i].name, name)) return actions[i].multi;
     return 0;
 }
 
-const char **action_names(int *n) {
+const char **cm_action_names(int *n) {
     static const char *names[sizeof actions / sizeof actions[0]];
     int i;
     for (i = 0; i < NACTIONS; i++) names[i] = actions[i].name;
@@ -2456,52 +2437,52 @@ const char **action_names(int *n) {
 static void cmd_edit_done(const char *resp, int canceled, void *data) {
     (void)data;
     if (canceled || !resp) return;
-    command_run(cur_pane(), resp);
+    cm_command_run(cm_cur_pane(), resp);
 }
 
 /* run one action by name on pane p (handles multi-cursor iteration) */
 static int run_one(Pane *p, const char *name) {
     ActionFn fn;
     int ok = 1, i;
-    if (starts_with(name, "command:")) {
-        command_run(p, name + 8);
+    if (cm_starts_with(name, "command:")) {
+        cm_command_run(p, name + 8);
         return 1;
     }
-    if (starts_with(name, "command-edit:")) {
-        prompt_text("> ", name + 13, HIST_COMMAND, cmd_edit_done, NULL, NULL);
+    if (cm_starts_with(name, "command-edit:")) {
+        cm_prompt_text("> ", name + 13, HIST_COMMAND, cmd_edit_done, NULL, NULL);
         return 1;
     }
     if (!strcmp(name, "lua:comment.comment")) name = "Comment";
-    fn = action_find(name);
+    fn = cm_action_find(name);
     if (!fn) {
-        editor_set_error("Unknown action: %s", name);
+        cm_editor_set_error("Unknown action: %s", name);
         return 0;
     }
     if (strcmp(name, "Autocomplete") && strcmp(name, "CycleAutocompleteBack")) ac_clear();
-    if (action_is_multi(name) && p->ncur > 1) {
+    if (cm_action_is_multi(name) && p->ncur > 1) {
         int saved = p->active;
         for (i = 0; i < p->ncur; i++) {
             p->active = i;
             ok = fn(p) && ok;
         }
         p->active = saved < p->ncur ? saved : p->ncur - 1;
-        pane_merge_cursors(p);
+        cm_pane_merge_cursors(p);
     } else {
-        if (!action_is_multi(name) || p->ncur <= 1) {
+        if (!cm_action_is_multi(name) || p->ncur <= 1) {
             ok = fn(p);
         }
     }
     /* like micro, macros record only cursor/edit actions and typed text */
-    if (action_is_multi(name)) macro_record(0, name, (int)strlen(name), 0);
+    if (cm_action_is_multi(name)) cm_macro_record(0, name, (int)strlen(name), 0);
     return ok;
 }
 
-int run_action_string(Pane *p, const char *acts, InEvent *ev) {
+int cm_run_action_string(Pane *p, const char *acts, InEvent *ev) {
     const char *s = acts;
     int ok = 1;
     char sep = 0;
-    Tab *t0 = cur_tab();
-    Pane *active0 = cur_pane();
+    Tab *t0 = cm_cur_tab();
+    Pane *active0 = cm_cur_pane();
     (void)ev;
     no_relocate = 0;
     while (*s) {
@@ -2509,7 +2490,7 @@ int run_action_string(Pane *p, const char *acts, InEvent *ev) {
         char name[256];
         size_t n;
         /* command: actions may contain separators; take the rest of the string */
-        if (starts_with(s, "command:") || starts_with(s, "command-edit:")) {
+        if (cm_starts_with(s, "command:") || cm_starts_with(s, "command-edit:")) {
             e = s + strlen(s);
         } else {
             while (*e && *e != ',' && *e != '|' && *e != '&') e++;
@@ -2520,20 +2501,20 @@ int run_action_string(Pane *p, const char *acts, InEvent *ev) {
         name[n] = 0;
         if (sep == '&' && !ok) break;
         if (sep == '|' && ok) break;
-        if (cur_pane() != active0) p = active0 = cur_pane(); /* an action switched panes */
+        if (cm_cur_pane() != active0) p = active0 = cm_cur_pane(); /* an action switched panes */
         if (!p) break;
         {
-            int had_prompt = prompt_active();
+            int had_prompt = cm_prompt_active();
             ok = run_one(p, name);
             /* an action opened a prompt: the rest of the chain must not run
                underneath it (it could close the pane the prompt refers to) */
-            if (!had_prompt && prompt_active()) break;
+            if (!had_prompt && cm_prompt_active()) break;
         }
         if (!*e) break;
         sep = *e;
         s = e + 1;
     }
-    if (cur_pane() != active0) p = cur_pane();
-    if (p && !no_relocate && cur_tab() == t0) pane_relocate(p);
+    if (cm_cur_pane() != active0) p = cm_cur_pane();
+    if (p && !no_relocate && cm_cur_tab() == t0) cm_pane_relocate(p);
     return ok;
 }

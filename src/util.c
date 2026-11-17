@@ -2,108 +2,222 @@
 #include "platform.h"
 
 #include <ctype.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-void *xmalloc(size_t n) {
+static void out_of_memory(void) {
+    fputs("micro: out of memory\n", stderr);
+    exit(1);
+}
+
+void *cm_xmalloc(size_t n) {
     void *p = malloc(n ? n : 1);
-    if (!p) { fputs("micro: out of memory\n", stderr); exit(1); }
+    if (!p) out_of_memory();
     return p;
 }
 
-void *xcalloc(size_t n, size_t m) {
-    void *p = calloc(n ? n : 1, m ? m : 1);
-    if (!p) { fputs("micro: out of memory\n", stderr); exit(1); }
+void *cm_xcalloc(size_t n, size_t m) {
+    void *p;
+    if (m != 0 && n > P_SIZE_MAX / m) out_of_memory();
+    p = calloc(n ? n : 1, m ? m : 1);
+    if (!p) out_of_memory();
     return p;
 }
 
-void *xrealloc(void *p, size_t n) {
-    p = realloc(p, n ? n : 1);
-    if (!p) { fputs("micro: out of memory\n", stderr); exit(1); }
-    return p;
+void *cm_xrealloc(void *p, size_t n) {
+    void *np = realloc(p, n ? n : 1);
+    if (!np) out_of_memory();
+    return np;
 }
 
-char *xstrdup(const char *s) {
+char *cm_xstrdup(const char *s) {
     size_t n = strlen(s);
-    char *r = xmalloc(n + 1);
+    char *r = cm_xmalloc(n + 1);
     memcpy(r, s, n + 1);
     return r;
 }
 
-char *xstrndup(const char *s, size_t n) {
-    char *r = xmalloc(n + 1);
+char *cm_xstrndup(const char *s, size_t n) {
+    char *r = cm_xmalloc(n + 1);
     memcpy(r, s, n);
     r[n] = 0;
     return r;
 }
 
-char *xsprintf(const char *fmt, ...) {
+char *cm_xsprintf(const char *fmt, ...) {
     va_list ap;
-    int n;
-    char *r;
+    Str s;
+    cm_str_init(&s);
     va_start(ap, fmt);
-    n = vsnprintf(NULL, 0, fmt, ap);
+    cm_str_vprintf(&s, fmt, ap);
     va_end(ap);
-    r = xmalloc((size_t)n + 1);
-    va_start(ap, fmt);
-    vsnprintf(r, (size_t)n + 1, fmt, ap);
-    va_end(ap);
-    return r;
+    return cm_str_detach(&s);
 }
 
 /* ---------- Str ---------- */
 
-void str_init(Str *s) { s->s = NULL; s->len = s->cap = 0; }
-void str_free(Str *s) { free(s->s); str_init(s); }
-void str_clear(Str *s) { s->len = 0; if (s->s) s->s[0] = 0; }
+void cm_str_init(Str *s) { s->s = NULL; s->len = s->cap = 0; }
+void cm_str_free(Str *s) { free(s->s); cm_str_init(s); }
+void cm_str_clear(Str *s) { s->len = 0; if (s->s) s->s[0] = 0; }
 
-void str_reserve(Str *s, int n) {
+void cm_str_reserve(Str *s, int n) {
+    if (n < 0 || n >= INT_MAX) out_of_memory(); /* length overflowed */
     if (n + 1 > s->cap) {
         int c = s->cap ? s->cap : 16;
-        while (c < n + 1) c *= 2;
-        s->s = xrealloc(s->s, (size_t)c);
+        while (c < n + 1) c = c > INT_MAX / 2 ? n + 1 : c * 2;
+        s->s = cm_xrealloc(s->s, (size_t)c);
         s->cap = c;
         s->s[s->len] = 0; /* always NUL-terminated, even when empty */
     }
 }
 
-void str_putn(Str *s, const char *p, int n) {
-    if (n <= 0) { str_reserve(s, s->len); s->s[s->len] = 0; return; }
-    str_reserve(s, s->len + n);
+void cm_str_putn(Str *s, const char *p, int n) {
+    if (n <= 0) { cm_str_reserve(s, s->len); s->s[s->len] = 0; return; }
+    if (n > INT_MAX - s->len) out_of_memory();
+    cm_str_reserve(s, s->len + n);
     memcpy(s->s + s->len, p, (size_t)n);
     s->len += n;
     s->s[s->len] = 0;
 }
 
-void str_puts(Str *s, const char *p) { str_putn(s, p, (int)strlen(p)); }
-void str_putc(Str *s, char c) { str_putn(s, &c, 1); }
+void cm_str_puts(Str *s, const char *p) { cm_str_putn(s, p, (int)strlen(p)); }
+void cm_str_putc(Str *s, char c) { cm_str_putn(s, &c, 1); }
 
-void str_printf(Str *s, const char *fmt, ...) {
+void cm_str_printf(Str *s, const char *fmt, ...) {
     va_list ap;
-    int n;
     va_start(ap, fmt);
-    n = vsnprintf(NULL, 0, fmt, ap);
+    cm_str_vprintf(s, fmt, ap);
     va_end(ap);
-    str_reserve(s, s->len + n);
-    va_start(ap, fmt);
-    vsnprintf(s->s + s->len, (size_t)n + 1, fmt, ap);
-    va_end(ap);
-    s->len += n;
 }
 
-void str_insert(Str *s, int at, const char *p, int n) {
+static void put_pad(Str *s, int n, char c) {
+    while (n-- > 0) cm_str_putc(s, c);
+}
+
+/* digits of u in base 10 or 16, most significant first; returns the count */
+static int fmt_ulong(char *out, unsigned long u, unsigned base, int upper) {
+    static const char lo[] = "0123456789abcdef", up[] = "0123456789ABCDEF";
+    char tmp[sizeof(unsigned long) * CHAR_BIT / 3 + 2];
+    int n = 0, i;
+    do {
+        tmp[n++] = (upper ? up : lo)[u % base];
+        u /= base;
+    } while (u != 0);
+    for (i = 0; i < n; i++) out[i] = tmp[n - 1 - i];
+    return n;
+}
+
+/* Appends formatted text to s.  C89 has no vsnprintf, so this implements the
+ * printf subset the editor uses: flags '-' and '0', width and precision
+ * (digits or '*'), the 'l' length modifier, and the conversions
+ * d i u x X c s %.  Anything else is copied through literally. */
+void cm_str_vprintf(Str *s, const char *fmt, va_list ap) {
+    const char *p = fmt;
+    while (*p) {
+        int left = 0, zero = 0, width = 0, prec = -1, long_mod = 0, numeric = 1;
+        int blen = 0, digits_min = 0, out_len;
+        char num[sizeof(unsigned long) * CHAR_BIT / 3 + 2];
+        unsigned char ch[1];
+        const char *body = num, *sign = "";
+        if (*p != '%') {
+            const char *q = p;
+            while (*q && *q != '%') q++;
+            cm_str_putn(s, p, (int)(q - p));
+            p = q;
+            continue;
+        }
+        p++;
+        for (;; p++) {
+            if (*p == '-') left = 1;
+            else if (*p == '0') zero = 1;
+            else break;
+        }
+        if (*p == '*') {
+            width = va_arg(ap, int);
+            if (width < 0) { left = 1; width = width < -100000 ? 100000 : -width; }
+            p++;
+        } else {
+            for (; *p >= '0' && *p <= '9'; p++)
+                if (width < 100000) width = width * 10 + (*p - '0');
+        }
+        if (*p == '.') {
+            p++;
+            prec = 0;
+            if (*p == '*') {
+                prec = va_arg(ap, int);
+                if (prec < 0) prec = -1;
+                p++;
+            } else {
+                for (; *p >= '0' && *p <= '9'; p++)
+                    if (prec < 100000) prec = prec * 10 + (*p - '0');
+            }
+        }
+        if (*p == 'l') { long_mod = 1; p++; }
+        switch (*p) {
+        case 'd': case 'i': {
+            long v = long_mod ? va_arg(ap, long) : (long)va_arg(ap, int);
+            unsigned long u;
+            if (v < 0) { sign = "-"; u = 0UL - (unsigned long)v; }
+            else u = (unsigned long)v;
+            blen = fmt_ulong(num, u, 10u, 0);
+            break;
+        }
+        case 'u': case 'x': case 'X': {
+            unsigned long u = long_mod ? va_arg(ap, unsigned long) : (unsigned long)va_arg(ap, unsigned);
+            blen = fmt_ulong(num, u, *p == 'u' ? 10u : 16u, *p == 'X');
+            break;
+        }
+        case 'c':
+            /* through unsigned char: storing a byte >= 0x80 in a plain char
+               would be implementation-defined */
+            ch[0] = (unsigned char)va_arg(ap, int);
+            body = (const char *)ch;
+            blen = 1;
+            numeric = 0;
+            break;
+        case 's':
+            body = va_arg(ap, const char *);
+            if (!body) body = "(null)";
+            while ((prec < 0 || blen < prec) && body[blen]) blen++;
+            numeric = 0;
+            break;
+        case '%':
+            cm_str_putc(s, '%');
+            p++;
+            continue;
+        default:
+            /* unsupported conversion: emit it unchanged */
+            cm_str_putc(s, '%');
+            if (*p) cm_str_putc(s, *p++);
+            continue;
+        }
+        p++;
+        if (numeric && prec == 0 && blen == 1 && num[0] == '0') blen = 0; /* "%.0d" of 0 is empty */
+        if (numeric && prec > blen) digits_min = prec - blen;
+        out_len = (int)strlen(sign) + digits_min + blen;
+        if (!left && !(zero && numeric && prec < 0)) put_pad(s, width - out_len, ' ');
+        cm_str_puts(s, sign);
+        if (!left && zero && numeric && prec < 0) put_pad(s, width - out_len, '0');
+        put_pad(s, digits_min, '0');
+        cm_str_putn(s, body, blen);
+        if (left) put_pad(s, width - out_len, ' ');
+    }
+}
+
+void cm_str_insert(Str *s, int at, const char *p, int n) {
     if (at < 0) at = 0;
     if (at > s->len) at = s->len;
-    str_reserve(s, s->len + n);
+    cm_str_reserve(s, s->len + n);
     memmove(s->s + at + n, s->s + at, (size_t)(s->len - at));
     memcpy(s->s + at, p, (size_t)n);
     s->len += n;
     s->s[s->len] = 0;
 }
 
-void str_delete(Str *s, int at, int n) {
+void cm_str_delete(Str *s, int at, int n) {
     if (at < 0 || at >= s->len || n <= 0) return;
     if (at + n > s->len) n = s->len - at;
     memmove(s->s + at, s->s + at + n, (size_t)(s->len - at - n));
@@ -111,36 +225,36 @@ void str_delete(Str *s, int at, int n) {
     s->s[s->len] = 0;
 }
 
-char *str_detach(Str *s) {
-    char *r = s->s ? s->s : xstrdup("");
-    str_init(s);
+char *cm_str_detach(Str *s) {
+    char *r = s->s ? s->s : cm_xstrdup("");
+    cm_str_init(s);
     return r;
 }
 
 /* ---------- UTF-8 ---------- */
 
-int utf8_decode(const char *str, int len, int *cp) {
+int cm_utf8_decode(const char *str, int len, int *cp) {
     const unsigned char *s = (const unsigned char *)str;
     if (len <= 0) { *cp = 0; return 0; }
     if (s[0] < 0x80) { *cp = s[0]; return 1; }
     if ((s[0] & 0xE0) == 0xC0 && len >= 2 && (s[1] & 0xC0) == 0x80) {
-        *cp = ((s[0] & 0x1F) << 6) | (s[1] & 0x3F);
+        *cp = (int)(((p_u32)(s[0] & 0x1F) << 6) | (p_u32)(s[1] & 0x3F));
         if (*cp >= 0x80) return 2;
     } else if ((s[0] & 0xF0) == 0xE0 && len >= 3 && (s[1] & 0xC0) == 0x80 &&
                (s[2] & 0xC0) == 0x80) {
-        *cp = ((s[0] & 0x0F) << 12) | ((s[1] & 0x3F) << 6) | (s[2] & 0x3F);
+        *cp = (int)(((p_u32)(s[0] & 0x0F) << 12) | ((p_u32)(s[1] & 0x3F) << 6) | (p_u32)(s[2] & 0x3F));
         if (*cp >= 0x800) return 3;
     } else if ((s[0] & 0xF8) == 0xF0 && len >= 4 && (s[1] & 0xC0) == 0x80 &&
                (s[2] & 0xC0) == 0x80 && (s[3] & 0xC0) == 0x80) {
-        *cp = ((s[0] & 0x07) << 18) | ((s[1] & 0x3F) << 12) | ((s[2] & 0x3F) << 6) |
-              (s[3] & 0x3F);
+        *cp = (int)(((p_u32)(s[0] & 0x07) << 18) | ((p_u32)(s[1] & 0x3F) << 12) |
+                    ((p_u32)(s[2] & 0x3F) << 6) | (p_u32)(s[3] & 0x3F));
         if (*cp >= 0x10000 && *cp <= 0x10FFFF) return 4;
     }
     *cp = 0xFFFD; /* invalid byte: treat as one replacement char */
     return 1;
 }
 
-int utf8_encode(int cp, char *out) {
+int cm_utf8_encode(int cp, char *out) {
     if (cp < 0x80) { out[0] = (char)cp; return 1; }
     if (cp < 0x800) {
         out[0] = (char)(0xC0 | (cp >> 6));
@@ -160,32 +274,32 @@ int utf8_encode(int cp, char *out) {
     return 4;
 }
 
-int utf8_next(const char *s, int len, int i) {
+int cm_utf8_next(const char *s, int len, int i) {
     int cp;
     if (i >= len) return len;
-    return i + utf8_decode(s + i, len - i, &cp);
+    return i + cm_utf8_decode(s + i, len - i, &cp);
 }
 
-int utf8_prev(const char *s, int i) {
+int cm_utf8_prev(const char *s, int i) {
     int j, cp, n;
     if (i <= 0) return 0;
     /* walk back over continuation bytes, but verify the sequence decodes */
     for (j = i - 1; j > 0 && j > i - 4 && (((unsigned char)s[j]) & 0xC0) == 0x80; j--)
         ;
-    n = utf8_decode(s + j, i - j, &cp);
+    n = cm_utf8_decode(s + j, i - j, &cp);
     if (j + n == i) return j;
     return i - 1;
 }
 
-int utf8_count(const char *s, int len) {
+int cm_utf8_count(const char *s, int len) {
     int i = 0, n = 0;
-    while (i < len) { i = utf8_next(s, len, i); n++; }
+    while (i < len) { i = cm_utf8_next(s, len, i); n++; }
     return n;
 }
 
-int utf8_offset(const char *s, int len, int nchars) {
+int cm_utf8_offset(const char *s, int len, int nchars) {
     int i = 0;
-    while (nchars-- > 0 && i < len) i = utf8_next(s, len, i);
+    while (nchars-- > 0 && i < len) i = cm_utf8_next(s, len, i);
     return i;
 }
 
@@ -233,7 +347,7 @@ static int in_table(int cp, const struct range *t, int n) {
     return 0;
 }
 
-int char_width(int cp) {
+int cm_char_width(int cp) {
     if (cp == 0) return 0;
     if (cp < 32 || (cp >= 0x7F && cp < 0xA0)) return 1; /* drawn as replacement */
     if (cp < 0x300) return 1;
@@ -242,20 +356,20 @@ int char_width(int cp) {
     return 1;
 }
 
-int is_word_char(int cp) {
+int cm_is_word_char(int cp) {
     if (cp < 128) return isalnum(cp) || cp == '_';
     /* treat all non-ASCII letters/symbols (except common punctuation/space) as word chars */
     if (cp == 0xA0 || (cp >= 0x2000 && cp <= 0x206F) || cp == 0x3000) return 0;
     return 1;
 }
 
-int is_space_char(int cp) { return cp == ' ' || cp == '\t'; }
+int cm_is_space_char(int cp) { return cp == ' ' || cp == '\t'; }
 
 /* ---------- misc ---------- */
 
-int streq(const char *a, const char *b) { return a && b && strcmp(a, b) == 0; }
+int cm_streq(const char *a, const char *b) { return a && b && strcmp(a, b) == 0; }
 
-int strieq(const char *a, const char *b) {
+int cm_strieq(const char *a, const char *b) {
     if (!a || !b) return 0;
     while (*a && *b) {
         if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) return 0;
@@ -264,84 +378,83 @@ int strieq(const char *a, const char *b) {
     return *a == *b;
 }
 
-int starts_with(const char *s, const char *p) { return strncmp(s, p, strlen(p)) == 0; }
+int cm_starts_with(const char *s, const char *p) { return strncmp(s, p, strlen(p)) == 0; }
 
-int ends_with(const char *s, const char *suf) {
+int cm_ends_with(const char *s, const char *suf) {
     size_t a = strlen(s), b = strlen(suf);
     return a >= b && strcmp(s + a - b, suf) == 0;
 }
 
-const char *path_last_sep(const char *p) {
+const char *cm_path_last_sep(const char *p) {
     const char *r = NULL;
     for (; *p; p++)
-        if (plat_is_sep((unsigned char)*p)) r = p;
+        if (*p == '/') r = p;
     return r;
 }
 
-char *path_join(const char *a, const char *b) {
+char *cm_path_join(const char *a, const char *b) {
     size_t n = strlen(a);
-    if (plat_is_abs(b)) return xstrdup(b);
-    if (n == 0) return xstrdup(b);
-    if (plat_is_sep((unsigned char)a[n - 1])) return xsprintf("%s%s", a, b);
-    return xsprintf("%s/%s", a, b);
+    if (b[0] == '/') return cm_xstrdup(b);
+    if (n == 0) return cm_xstrdup(b);
+    if (a[n - 1] == '/') return cm_xsprintf("%s%s", a, b);
+    return cm_xsprintf("%s/%s", a, b);
 }
 
-const char *path_base(const char *p) {
-    const char *s = path_last_sep(p);
+const char *cm_path_base(const char *p) {
+    const char *s = cm_path_last_sep(p);
     return s ? s + 1 : p;
 }
 
-char *path_dir(const char *p) {
-    const char *s = path_last_sep(p);
-    if (!s) return xstrdup(".");
-    if (s == p) return xstrndup(p, 1);              /* "/" */
-    if (s == p + 2 && p[1] == ':') return xstrndup(p, 3); /* "C:\" */
-    return xstrndup(p, (size_t)(s - p));
+char *cm_path_dir(const char *p) {
+    const char *s = cm_path_last_sep(p);
+    if (!s) return cm_xstrdup(".");
+    if (s == p) return cm_xstrndup(p, 1);              /* "/" */
+    return cm_xstrndup(p, (size_t)(s - p));
 }
 
-char *expand_home(const char *p) {
+char *cm_expand_home(const char *p) {
     char *home, *r;
-    if (p[0] != '~' || (p[1] != 0 && !plat_is_sep((unsigned char)p[1]))) return xstrdup(p);
-    home = plat_home_dir();
-    if (!home) return xstrdup(p);
-    r = xsprintf("%s%s", home, p + 1);
+    if (p[0] != '~' || (p[1] != 0 && p[1] != '/')) return cm_xstrdup(p);
+    home = cm_plat_home_dir();
+    if (!home) return cm_xstrdup(p);
+    r = cm_xsprintf("%s%s", home, p + 1);
     free(home);
     return r;
 }
 
-char *read_file(const char *path, long *len) {
-    FILE *f = plat_fopen(path, "rb");
+char *cm_read_file(const char *path, long *len) {
+    FILE *f = fopen(path, "rb");
     Str s;
-    char buf[65536];
+    char buf[16384]; /* C89 guarantees objects up to 32767 bytes */
     size_t n;
     if (!f) return NULL;
-    str_init(&s);
-    str_reserve(&s, 0);
-    while ((n = fread(buf, 1, sizeof buf, f)) > 0) str_putn(&s, buf, (int)n);
-    if (ferror(f)) { fclose(f); str_free(&s); return NULL; }
+    cm_str_init(&s);
+    cm_str_reserve(&s, 0);
+    while ((n = fread(buf, 1, sizeof buf, f)) > 0) cm_str_putn(&s, buf, (int)n);
+    if (ferror(f)) { fclose(f); cm_str_free(&s); return NULL; }
     fclose(f);
     if (len) *len = s.len;
-    return str_detach(&s);
+    return cm_str_detach(&s);
 }
 
 /* glob with *, ?, ** and [...] classes; '*' does not cross '/', '**' does */
-int glob_match(const char *p, const char *s) {
+int cm_glob_match(const char *p, const char *s) {
     while (*p) {
         if (p[0] == '*' && p[1] == '*') {
             p += 2;
-            if (plat_is_sep((unsigned char)*p)) p++;
+            if (*p == '/') p++;
             for (;; s++) {
-                if (glob_match(p, s)) return 1;
+                if (cm_glob_match(p, s)) return 1;
                 if (!*s) return 0;
             }
         } else if (*p == '*') {
             p++;
             for (;; s++) {
-                if (glob_match(p, s)) return 1;
-                if (!*s || plat_is_sep((unsigned char)*s)) return 0;
+                if (cm_glob_match(p, s)) return 1;
+                if (!*s || *s == '/') return 0;
             }
         } else if (*p == '?') {
-            if (!*s || plat_is_sep((unsigned char)*s)) return 0;
+            if (!*s || *s == '/') return 0;
             p++; s++;
         } else if (*p == '[') {
             int neg = 0, ok = 0;
@@ -360,64 +473,72 @@ int glob_match(const char *p, const char *s) {
             p = *q ? q + 1 : q;
             s++;
         } else {
-            if (*p != *s && !(plat_is_sep((unsigned char)*p) && plat_is_sep((unsigned char)*s))) return 0;
+            if (*p != *s) return 0;
             p++; s++;
         }
     }
     return *s == 0;
 }
 
-int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
-int mini(int a, int b) { return a < b ? a : b; }
-int maxi(int a, int b) { return a > b ? a : b; }
-int digits(int n) { int d = 1; while (n >= 10) { n /= 10; d++; } return d; }
+/* atoi() without its undefined behavior on out-of-range input: the result
+   is clamped to [-1000000000, 1000000000], so callers can add small offsets
+   (line numbers, counts) without overflowing an int. */
+int cm_clamped_atoi(const char *s) {
+    long v = strtol(s, NULL, 10);
+    if (v > 1000000000L) return 1000000000;
+    if (v < -1000000000L) return -1000000000;
+    return (int)v;
+}
 
-char **shell_split(const char *s, int *argc) {
+int cm_clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+int cm_mini(int a, int b) { return a < b ? a : b; }
+int cm_maxi(int a, int b) { return a > b ? a : b; }
+int cm_digits(int n) { int d = 1; while (n >= 10) { n /= 10; d++; } return d; }
+
+char **cm_shell_split(const char *s, int *argc) {
     char **v = NULL;
     int n = 0, cap = 0;
-    int win = plat_is_sep('\\'); /* Windows: backslashes are literal */
     Str cur;
-    str_init(&cur);
+    cm_str_init(&cur);
     while (*s) {
         int have = 0;
         while (*s == ' ' || *s == '\t') s++;
         if (!*s) break;
-        str_clear(&cur);
-        str_reserve(&cur, 0);
+        cm_str_clear(&cur);
+        cm_str_reserve(&cur, 0);
         while (*s && *s != ' ' && *s != '\t') {
             have = 1;
             if (*s == '"') {
                 s++;
                 while (*s && *s != '"') {
-                    if (*s == '\\' && !win && (s[1] == '"' || s[1] == '\\')) s++;
-                    else if (*s == '\\' && win && s[1] == '"') s++;
-                    str_putc(&cur, *s++);
+                    if (*s == '\\' && (s[1] == '"' || s[1] == '\\')) s++;
+                    cm_str_putc(&cur, *s++);
                 }
                 if (*s) s++;
             } else if (*s == '\'') {
                 s++;
-                while (*s && *s != '\'') str_putc(&cur, *s++);
+                while (*s && *s != '\'') cm_str_putc(&cur, *s++);
                 if (*s) s++;
-            } else if (*s == '\\' && s[1] && !win) {
+            } else if (*s == '\\' && s[1]) {
                 s++;
-                str_putc(&cur, *s++);
+                cm_str_putc(&cur, *s++);
             } else {
-                str_putc(&cur, *s++);
+                cm_str_putc(&cur, *s++);
             }
         }
         if (have) {
-            if (n + 2 > cap) { cap = cap ? cap * 2 : 8; v = xrealloc(v, sizeof *v * (size_t)cap); }
-            v[n++] = xstrdup(cur.s ? cur.s : "");
+            if (n + 2 > cap) { cap = cap ? cap * 2 : 8; v = cm_xrealloc(v, sizeof *v * (size_t)cap); }
+            v[n++] = cm_xstrdup(cur.s ? cur.s : "");
         }
     }
-    str_free(&cur);
-    if (!v) v = xmalloc(sizeof *v);
+    cm_str_free(&cur);
+    if (!v) v = cm_xmalloc(sizeof *v);
     v[n] = NULL;
     if (argc) *argc = n;
     return v;
 }
 
-void free_strv(char **v) {
+void cm_free_strv(char **v) {
     char **p;
     if (!v) return;
     for (p = v; *p; p++) free(*p);

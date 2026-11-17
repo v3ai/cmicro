@@ -2,8 +2,9 @@
 
 Micro is a terminal-based text editor that aims to be easy to use and
 intuitive, while also taking advantage of the full capabilities of modern
-terminals. This is a rewrite of micro in C (C99 + the C standard library,
-with a small platform layer for the terminal: POSIX, or the Windows console).
+terminals. This is a rewrite of micro in portable C (code that compiles as
+C89 through C23 using only the C standard library, plus a small POSIX layer
+for the terminal). It runs on Linux, macOS, the BSDs, WSL and Cygwin.
 
 To open the command bar, press Ctrl-e. This enables a `>` prompt for typing
 commands. From now on when the documentation says to run a command such as
@@ -61,7 +62,3 @@ of micro's default plugins (`autoclose`, `comment`, `ftoptions`, `status`).
 
 Not available: Lua plugins and the plugin manager, the built-in terminal
 emulator (`term`), the git diff gutter, and file encodings other than UTF-8.
-
-On Windows, shell commands (`run`, `textfilter`, Ctrl-b) use `cmd.exe`, the
-clipboard is the Windows clipboard, new files use CRLF line endings, and
-your configuration lives in `%USERPROFILE%\.config\micro`.

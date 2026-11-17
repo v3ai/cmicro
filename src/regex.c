@@ -65,7 +65,7 @@ typedef struct {
 } Parser;
 
 static Node *new_node(int type) {
-    Node *n = xcalloc(1, sizeof *n);
+    Node *n = cm_xcalloc(1, sizeof *n);
     n->type = type;
     n->cap = -1;
     return n;
@@ -74,7 +74,7 @@ static Node *new_node(int type) {
 static void add_kid(Node *n, Node *k) {
     if (n->nkids == n->kcap) {
         n->kcap = n->kcap ? n->kcap * 2 : 4;
-        n->kids = xrealloc(n->kids, sizeof *n->kids * (size_t)n->kcap);
+        n->kids = cm_xrealloc(n->kids, sizeof *n->kids * (size_t)n->kcap);
     }
     n->kids[n->nkids++] = k;
 }
@@ -90,7 +90,7 @@ static void free_node(Node *n) {
 static int new_class(Regex *re) {
     if (re->nclass == re->cclass) {
         re->cclass = re->cclass ? re->cclass * 2 : 4;
-        re->classes = xrealloc(re->classes, sizeof *re->classes * (size_t)re->cclass);
+        re->classes = cm_xrealloc(re->classes, sizeof *re->classes * (size_t)re->cclass);
     }
     memset(&re->classes[re->nclass], 0, sizeof(Class));
     return re->nclass++;
@@ -99,7 +99,7 @@ static int new_class(Regex *re) {
 static void class_add(Class *c, int lo, int hi) {
     if (c->n == c->cap) {
         c->cap = c->cap ? c->cap * 2 : 8;
-        c->r = xrealloc(c->r, sizeof *c->r * (size_t)c->cap);
+        c->r = cm_xrealloc(c->r, sizeof *c->r * (size_t)c->cap);
     }
     c->r[c->n].lo = lo;
     c->r[c->n].hi = hi;
@@ -109,7 +109,7 @@ static void class_add(Class *c, int lo, int hi) {
 /* add the complement of ranges [r..r+n) (sorted not required) */
 static void class_add_negated(Class *c, const Range *r, int n) {
     /* simple approach: sort a copy and add the gaps */
-    Range *t = xmalloc(sizeof *t * (size_t)(n ? n : 1));
+    Range *t = cm_xmalloc(sizeof *t * (size_t)(n ? n : 1));
     int i, j, prev = 0;
     memcpy(t, r, sizeof *t * (size_t)n);
     for (i = 1; i < n; i++)
@@ -226,7 +226,7 @@ static int hexval(int c) {
 }
 
 static void set_err(Parser *ps, const char *msg) {
-    if (!ps->err) ps->err = xsprintf("%s at offset %d", msg, (int)(ps->p - ps->start));
+    if (!ps->err) ps->err = cm_xsprintf("%s at offset %d", msg, (int)(ps->p - ps->start));
 }
 
 /* Parse an escape after '\'.  Returns code point >= 0 for a literal,
@@ -310,7 +310,7 @@ static int parse_escape(Parser *ps, Class *cls, int *assert_kind) {
         if (c >= 0x80) {
             int cp, n;
             ps->p--;
-            n = utf8_decode(ps->p, (int)strlen(ps->p), &cp);
+            n = cm_utf8_decode(ps->p, (int)strlen(ps->p), &cp);
             ps->p += n;
             return cp;
         }
@@ -353,7 +353,7 @@ static Node *parse_class(Parser *ps, int flags) {
             if (lo == -2) continue;
             if (lo < 0) { if (!ps->err) set_err(ps, "bad escape in class"); return NULL; }
         } else {
-            int n2 = utf8_decode(ps->p, (int)strlen(ps->p), &lo);
+            int n2 = cm_utf8_decode(ps->p, (int)strlen(ps->p), &lo);
             ps->p += n2;
         }
         hi = lo;
@@ -364,7 +364,7 @@ static Node *parse_class(Parser *ps, int flags) {
                 hi = parse_escape(ps, NULL, NULL);
                 if (hi < 0) { if (!ps->err) set_err(ps, "bad range"); return NULL; }
             } else {
-                int n2 = utf8_decode(ps->p, (int)strlen(ps->p), &hi);
+                int n2 = cm_utf8_decode(ps->p, (int)strlen(ps->p), &hi);
                 ps->p += n2;
             }
             if (hi < lo) { set_err(ps, "invalid class range"); return NULL; }
@@ -489,7 +489,7 @@ static Node *parse_atom(Parser *ps, int *flags) {
             e = strstr(ps->p, "\\E");
             if (!e) e = ps->p + strlen(ps->p);
             while (ps->p < e) {
-                int cp, k = utf8_decode(ps->p, (int)(e - ps->p), &cp);
+                int cp, k = cm_utf8_decode(ps->p, (int)(e - ps->p), &cp);
                 Node *ch = new_node(N_CHAR);
                 ch->cp = cp;
                 ch->icase = (*flags & RE_ICASE) != 0;
@@ -522,7 +522,7 @@ static Node *parse_atom(Parser *ps, int *flags) {
         return n;
     }
     {
-        int cp, k = utf8_decode(ps->p, (int)strlen(ps->p), &cp);
+        int cp, k = cm_utf8_decode(ps->p, (int)strlen(ps->p), &cp);
         ps->p += k;
         n = new_node(N_CHAR);
         n->cp = cp;
@@ -607,7 +607,7 @@ static Node *parse_alt(Parser *ps, int *flags) {
 static int emit(Regex *re, int op, int x, int y, int flag) {
     if (re->nprog == re->cprog) {
         re->cprog = re->cprog ? re->cprog * 2 : 64;
-        re->prog = xrealloc(re->prog, sizeof *re->prog * (size_t)re->cprog);
+        re->prog = cm_xrealloc(re->prog, sizeof *re->prog * (size_t)re->cprog);
     }
     re->prog[re->nprog].op = (unsigned char)op;
     re->prog[re->nprog].x = x;
@@ -641,7 +641,7 @@ static int gen(Regex *re, Node *n) {
     case N_EMPTY: break;
     case N_CHAR: {
         char buf[4];
-        int k = utf8_encode(n->cp, buf);
+        int k = cm_utf8_encode(n->cp, buf);
         if (k == 1 && n->icase && isalpha((unsigned char)buf[0]))
             emit(re, I_CHARI, tolower((unsigned char)buf[0]), 0, 0);
         else
@@ -656,7 +656,7 @@ static int gen(Regex *re, Node *n) {
             if (gen(re, n->kids[i]) < 0) return -1;
         break;
     case N_ALT: {
-        int *jmps = xmalloc(sizeof(int) * (size_t)n->nkids);
+        int *jmps = cm_xmalloc(sizeof(int) * (size_t)n->nkids);
         for (i = 0; i < n->nkids; i++) {
             if (i < n->nkids - 1) {
                 int sp = emit(re, I_SPLIT, 0, 0, 0);
@@ -705,7 +705,7 @@ static int gen(Regex *re, Node *n) {
             else { re->prog[sp].x = re->nprog; re->prog[sp].y = body; }
         } else if (n->max > n->min) {
             int cnt = n->max - n->min;
-            int *sps = xmalloc(sizeof(int) * (size_t)cnt);
+            int *sps = cm_xmalloc(sizeof(int) * (size_t)cnt);
             for (i = 0; i < cnt; i++) {
                 sps[i] = emit(re, I_SPLIT, 0, 0, 0);
                 if (n->greedy) re->prog[sps[i]].x = re->nprog;
@@ -724,9 +724,9 @@ static int gen(Regex *re, Node *n) {
     return 0;
 }
 
-Regex *re_compile(const char *pattern, int flags, char **err) {
+Regex *cm_re_compile(const char *pattern, int flags, char **err) {
     Parser ps;
-    Regex *re = xcalloc(1, sizeof *re);
+    Regex *re = cm_xcalloc(1, sizeof *re);
     Node *root;
     int f = flags & RE_ICASE;
     memset(&ps, 0, sizeof ps);
@@ -738,7 +738,7 @@ Regex *re_compile(const char *pattern, int flags, char **err) {
         const char *p = pattern;
         root = new_node(N_CAT);
         while (*p) {
-            int cp, k = utf8_decode(p, (int)strlen(p), &cp);
+            int cp, k = cm_utf8_decode(p, (int)strlen(p), &cp);
             Node *ch = new_node(N_CHAR);
             ch->cp = cp;
             ch->icase = (flags & RE_ICASE) != 0;
@@ -750,17 +750,17 @@ Regex *re_compile(const char *pattern, int flags, char **err) {
         if (root && *ps.p == ')') { set_err(&ps, "unexpected )"); free_node(root); root = NULL; }
     }
     if (!root) {
-        if (err) *err = ps.err ? ps.err : xstrdup("invalid regex");
+        if (err) *err = ps.err ? ps.err : cm_xstrdup("invalid regex");
         else free(ps.err);
-        re_free(re);
+        cm_re_free(re);
         return NULL;
     }
     re->ncap = ps.ncap;
     emit(re, I_SAVE, 0, 0, 0);
     if (gen(re, root) < 0) {
         free_node(root);
-        if (err) *err = xstrdup("regex too large");
-        re_free(re);
+        if (err) *err = cm_xstrdup("regex too large");
+        cm_re_free(re);
         return NULL;
     }
     emit(re, I_SAVE, 1, 0, 0);
@@ -776,7 +776,7 @@ Regex *re_compile(const char *pattern, int flags, char **err) {
     return re;
 }
 
-void re_free(Regex *re) {
+void cm_re_free(Regex *re) {
     int i;
     if (!re) return;
     for (i = 0; i < re->nclass; i++) free(re->classes[i].r);
@@ -785,9 +785,9 @@ void re_free(Regex *re) {
     free(re);
 }
 
-int re_ncaps(const Regex *re) { return re->ncap; }
+int cm_re_ncaps(const Regex *re) { return re->ncap; }
 
-int re_context_free(const Regex *re) {
+int cm_re_context_free(const Regex *re) {
     int i;
     for (i = 0; i < re->nprog; i++) {
         const Inst *in = &re->prog[i];
@@ -852,7 +852,7 @@ static int run(const Regex *re, const char *s, int len, int start, int *caps, in
     do {                                                                       \
         if (sp == njobs_cap) {                                                 \
             njobs_cap = njobs_cap ? njobs_cap * 2 : 256;                       \
-            jobs = xrealloc(jobs, sizeof *jobs * (size_t)njobs_cap);           \
+            jobs = cm_xrealloc(jobs, sizeof *jobs * (size_t)njobs_cap);           \
         }                                                                      \
         jobs[sp].pc = (a); jobs[sp].pos = (b); jobs[sp].capi = (c); jobs[sp].capv = (d); sp++; \
     } while (0)
@@ -886,7 +886,7 @@ static int run(const Regex *re, const char *s, int len, int start, int *caps, in
                 int cp, k;
                 if (pos >= len) goto fail;
                 if (in->op == I_ANY && s[pos] == '\n') goto fail;
-                k = utf8_decode(s + pos, len - pos, &cp);
+                k = cm_utf8_decode(s + pos, len - pos, &cp);
                 pos += k;
                 pc++;
                 continue;
@@ -894,7 +894,7 @@ static int run(const Regex *re, const char *s, int len, int start, int *caps, in
             case I_CLASS: {
                 int cp, k;
                 if (pos >= len) goto fail;
-                k = utf8_decode(s + pos, len - pos, &cp);
+                k = cm_utf8_decode(s + pos, len - pos, &cp);
                 if (!class_match(&re->classes[in->x], cp)) goto fail;
                 pos += k;
                 pc++;
@@ -928,7 +928,7 @@ static int run(const Regex *re, const char *s, int len, int start, int *caps, in
 #undef PUSH
 }
 
-int re_search(const Regex *re, const char *s, int len, int start, int *caps, int ncap) {
+int cm_re_search(const Regex *re, const char *s, int len, int start, int *caps, int ncap) {
     int localcaps[20];
     int *cp = caps;
     int n = 2 * re->ncap, i, use_visit, found = 0;
@@ -937,7 +937,7 @@ int re_search(const Regex *re, const char *s, int len, int start, int *caps, int
     if (start > len) return 0;
     if (!caps || ncap < re->ncap) {
         if (n <= 20) cp = localcaps;
-        else cp = xmalloc(sizeof(int) * (size_t)n);
+        else cp = cm_xmalloc(sizeof(int) * (size_t)n);
     }
     for (i = 0; i < n; i++) cp[i] = -1;
     /* Normally one table covers the whole search.  For huge inputs the table
@@ -950,7 +950,7 @@ int re_search(const Regex *re, const char *s, int len, int start, int *caps, int
         vis_rows = windowed ? VISIT_MAX_BITS / (size_t)re->nprog : (size_t)(len - start) + 1;
         if (vis_rows == 0) vis_rows = 1;
         if (bytes > visit_cap) {
-            visit = xrealloc(visit, bytes);
+            visit = cm_xrealloc(visit, bytes);
             memset(visit + visit_cap, 0, bytes - visit_cap);
             visit_cap = bytes;
         }
@@ -979,7 +979,7 @@ int re_search(const Regex *re, const char *s, int len, int start, int *caps, int
         }
         if (re->anchored || budget < 0) break;
         if (i >= len) break;
-        i = utf8_next(s, len, i);
+        i = cm_utf8_next(s, len, i);
     }
     if (use_visit && vis_maxpos >= vis_base) {
         size_t endbit = (size_t)(vis_maxpos - vis_base + 1) * (size_t)re->nprog;
@@ -991,17 +991,17 @@ int re_search(const Regex *re, const char *s, int len, int start, int *caps, int
     return found;
 }
 
-int re_match_str(const Regex *re, const char *s) {
-    return re_search(re, s, (int)strlen(s), 0, NULL, 0);
+int cm_re_match_str(const Regex *re, const char *s) {
+    return cm_re_search(re, s, (int)strlen(s), 0, NULL, 0);
 }
 
-char *re_quote(const char *s) {
+char *cm_re_quote(const char *s) {
     Str o;
-    str_init(&o);
-    str_reserve(&o, 0);
+    cm_str_init(&o);
+    cm_str_reserve(&o, 0);
     for (; *s; s++) {
-        if (strchr("\\.+*?()|[]{}^$", *s)) str_putc(&o, '\\');
-        str_putc(&o, *s);
+        if (strchr("\\.+*?()|[]{}^$", *s)) cm_str_putc(&o, '\\');
+        cm_str_putc(&o, *s);
     }
-    return str_detach(&o);
+    return cm_str_detach(&o);
 }

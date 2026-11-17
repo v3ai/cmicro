@@ -1,10 +1,16 @@
 /*
- * platform.c - POSIX glue (Linux, macOS, BSDs, WSL, Cygwin).  See
- * platform.h; the native Windows version is platform_win32.c.
+ * platform.c - POSIX glue (Linux, macOS, the BSDs, WSL, Cygwin).  See
+ * platform.h.  This is the only file that includes system headers beyond
+ * the C89 standard library (Universal C rules, section 11); the build
+ * system selects it, nothing in the rest of the editor tests the platform.
+ *
+ * _POSIX_C_SOURCE asks the system headers for POSIX.1-2008.  _DEFAULT_SOURCE
+ * (glibc) and _DARWIN_C_SOURCE (macOS) additionally expose SIGWINCH and
+ * TIOCGWINSZ, which POSIX does not cover but every supported system has.
  */
-#ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
+#define _DARWIN_C_SOURCE
 #include "platform.h"
 
 #include <dirent.h>
@@ -29,7 +35,7 @@ static volatile sig_atomic_t winch_flag = 0;
 
 static void on_winch(int sig) { (void)sig; winch_flag = 1; }
 
-int plat_term_init(void) {
+int cm_plat_term_init(void) {
     struct termios raw;
     struct sigaction sa;
     if (tcgetattr(STDIN_FILENO, &orig_termios) == -1) return -1;
@@ -49,19 +55,27 @@ int plat_term_init(void) {
     return 0;
 }
 
-void plat_term_restore(void) {
+void cm_plat_term_restore(void) {
     if (raw_on) {
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
         raw_on = 0;
     }
 }
 
-int plat_term_size(int *w, int *h) {
+/* like atoi, but defined for any input: clamped to 0..10000 */
+static int env_dim(const char *s, int def) {
+    long v;
+    if (!s) return def;
+    v = strtol(s, NULL, 10);
+    return v < 0 ? 0 : v > 10000 ? 10000 : (int)v;
+}
+
+int cm_plat_term_size(int *w, int *h) {
     struct winsize ws;
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
         const char *c = getenv("COLUMNS"), *l = getenv("LINES");
-        *w = c ? atoi(c) : 80;
-        *h = l ? atoi(l) : 24;
+        *w = env_dim(c, 80);
+        *h = env_dim(l, 24);
         return -1;
     }
     *w = ws.ws_col;
@@ -69,7 +83,7 @@ int plat_term_size(int *w, int *h) {
     return 0;
 }
 
-int plat_read(char *buf, int n, int timeout_ms) {
+int cm_plat_read(char *buf, int n, int timeout_ms) {
     struct pollfd p;
     int r;
     p.fd = STDIN_FILENO;
@@ -82,7 +96,7 @@ int plat_read(char *buf, int n, int timeout_ms) {
     return r;
 }
 
-void plat_write(const char *buf, size_t n) {
+void cm_plat_write(const char *buf, size_t n) {
     while (n > 0) {
         ssize_t w = write(STDOUT_FILENO, buf, n);
         if (w < 0) {
@@ -94,22 +108,20 @@ void plat_write(const char *buf, size_t n) {
     }
 }
 
-int plat_resized(void) {
+int cm_plat_resized(void) {
     if (winch_flag) { winch_flag = 0; return 1; }
     return 0;
 }
 
-int plat_can_suspend(void) { return 1; }
-
-int plat_suspend(void) {
-    plat_term_restore();
+int cm_plat_suspend(void) {
+    cm_plat_term_restore();
     raise(SIGTSTP);
-    return plat_term_init();
+    return cm_plat_term_init();
 }
 
-int plat_stdin_is_tty(void) { return isatty(STDIN_FILENO); }
+int cm_plat_stdin_is_tty(void) { return isatty(STDIN_FILENO); }
 
-int plat_reopen_tty(void) {
+int cm_plat_reopen_tty(void) {
     int fd = open("/dev/tty", O_RDWR);
     if (fd < 0) return -1;
     dup2(fd, STDIN_FILENO);
@@ -117,31 +129,31 @@ int plat_reopen_tty(void) {
     return 0;
 }
 
-long long plat_now_ms(void) {
+p_s64 cm_plat_now_ms(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
-    return (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+    return (p_s64)tv.tv_sec * 1000 + (p_s64)(tv.tv_usec / 1000);
 }
 
-int plat_is_dir(const char *path) {
+int cm_plat_is_dir(const char *path) {
     struct stat st;
     return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
 }
 
-int plat_exists(const char *path) {
+int cm_plat_exists(const char *path) {
     struct stat st;
     return stat(path, &st) == 0;
 }
 
-int plat_is_writable(const char *path) { return access(path, W_OK) == 0; }
+int cm_plat_is_writable(const char *path) { return access(path, W_OK) == 0; }
 
-long long plat_mtime(const char *path) {
+p_s64 cm_plat_mtime(const char *path) {
     struct stat st;
     if (stat(path, &st) != 0) return 0;
-    return (long long)st.st_mtime;
+    return (p_s64)st.st_mtime;
 }
 
-int plat_mkdir_p(const char *path) {
+int cm_plat_mkdir_p(const char *path) {
     char tmp[PATH_MAX];
     size_t i, n = strlen(path);
     if (n == 0 || n >= sizeof tmp) return -1;
@@ -157,7 +169,7 @@ int plat_mkdir_p(const char *path) {
     return 0;
 }
 
-char *plat_getcwd(void) {
+char *cm_plat_getcwd(void) {
     char buf[PATH_MAX];
     char *r;
     if (!getcwd(buf, sizeof buf)) return NULL;
@@ -166,31 +178,40 @@ char *plat_getcwd(void) {
     return r;
 }
 
-int plat_chdir(const char *path) { return chdir(path); }
+int cm_plat_chdir(const char *path) { return chdir(path); }
 
-char *plat_realpath(const char *path) { return realpath(path, NULL); }
+char *cm_plat_realpath(const char *path) { return realpath(path, NULL); }
 
 static int cmp_str(const void *a, const void *b) {
     return strcmp(*(char *const *)a, *(char *const *)b);
 }
 
-char **plat_list_dir(const char *path) {
-    DIR *d = opendir(path && *path ? path : ".");
+char **cm_plat_list_dir(const char *path) {
+    const char *dir = path && *path ? path : ".";
+    size_t dirlen = strlen(dir);
+    DIR *d = opendir(dir);
     struct dirent *e;
     char **out = NULL;
     size_t n = 0, cap = 0;
     if (!d) return NULL;
     while ((e = readdir(d)) != NULL) {
-        char full[PATH_MAX];
+        char *full;
         size_t len;
         char *s;
+        int dir_flag;
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-        snprintf(full, sizeof full, "%s/%s", path && *path ? path : ".", e->d_name);
         len = strlen(e->d_name);
+        full = malloc(dirlen + len + 2);
+        if (!full) break;
+        memcpy(full, dir, dirlen);
+        full[dirlen] = '/';
+        memcpy(full + dirlen + 1, e->d_name, len + 1);
+        dir_flag = cm_plat_is_dir(full);
+        free(full);
         s = malloc(len + 2);
         if (!s) break;
         memcpy(s, e->d_name, len + 1);
-        if (plat_is_dir(full)) { s[len] = '/'; s[len + 1] = 0; }
+        if (dir_flag) { s[len] = '/'; s[len + 1] = 0; }
         if (n + 2 > cap) {
             char **nn;
             cap = cap ? cap * 2 : 32;
@@ -207,19 +228,7 @@ char **plat_list_dir(const char *path) {
     return out;
 }
 
-/* ---------------- portability helpers ---------------- */
-
-FILE *plat_fopen(const char *path, const char *mode) { return fopen(path, mode); }
-int plat_remove(const char *path) { return remove(path); }
-int plat_is_sep(int c) { return c == '/'; }
-int plat_is_abs(const char *path) { return path[0] == '/'; }
-int plat_system(const char *cmd) { return system(cmd); }
-const char *plat_null_device(void) { return "/dev/null"; }
-int plat_has_sudo(void) { return 1; }
-const char *plat_default_fileformat(void) { return "unix"; }
-void plat_args(int *argc, char ***argv) { (void)argc; (void)argv; }
-int plat_clipboard_set(const char *s, int len) { (void)s; (void)len; return -1; }
-char *plat_clipboard_get(int *len) { (void)len; return NULL; }
+/* ---------------- environment ---------------- */
 
 static char *dupstr(const char *s) {
     char *r;
@@ -229,16 +238,16 @@ static char *dupstr(const char *s) {
     return r;
 }
 
-char *plat_getenv(const char *name) { return dupstr(getenv(name)); }
-char *plat_home_dir(void) { return dupstr(getenv("HOME")); }
+char *cm_plat_getenv(const char *name) { return dupstr(getenv(name)); }
+char *cm_plat_home_dir(void) { return dupstr(getenv("HOME")); }
 
-char *plat_temp_dir(void) {
+char *cm_plat_temp_dir(void) {
     const char *d = getenv("TMPDIR");
     return dupstr(d && *d ? d : "/tmp");
 }
 
 /* single quotes for sh */
-char *plat_shell_quote(const char *s) {
+static char *shell_quote(const char *s) {
     size_t n = 3;
     const char *p;
     char *r, *o;
@@ -255,8 +264,8 @@ char *plat_shell_quote(const char *s) {
     return r;
 }
 
-char *plat_capture_cmd(const char *cmd, const char *in, const char *out) {
-    char *qi = in ? plat_shell_quote(in) : NULL, *qo = plat_shell_quote(out), *r;
+char *cm_plat_capture_cmd(const char *cmd, const char *in, const char *out) {
+    char *qi = in ? shell_quote(in) : NULL, *qo = shell_quote(out), *r;
     const char *fi = qi ? qi : "/dev/null";
     size_t n;
     if (!qo) { free(qi); return NULL; }
@@ -268,7 +277,7 @@ char *plat_capture_cmd(const char *cmd, const char *in, const char *out) {
     return r;
 }
 
-char *plat_read_stdin(long *len) {
+char *cm_plat_read_stdin(long *len) {
     size_t cap = 65536, n = 0, got;
     char *buf = malloc(cap + 1), *nb;
     if (!buf) return NULL;
@@ -285,8 +294,3 @@ char *plat_read_stdin(long *len) {
     if (len) *len = (long)n;
     return buf;
 }
-
-#endif /* !_WIN32 */
-
-/* ISO C forbids an empty translation unit */
-typedef int platform_posix_unused;

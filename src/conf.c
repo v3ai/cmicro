@@ -7,7 +7,7 @@
 #include <string.h>
 
 static CNode *cn_new(int type) {
-    CNode *n = xcalloc(1, sizeof *n);
+    CNode *n = cm_xcalloc(1, sizeof *n);
     n->type = type;
     return n;
 }
@@ -15,19 +15,19 @@ static CNode *cn_new(int type) {
 static void cn_push(CNode *n, char *key, CNode *v) {
     if (n->n == n->cap) {
         n->cap = n->cap ? n->cap * 2 : 8;
-        n->vals = xrealloc(n->vals, sizeof *n->vals * (size_t)n->cap);
-        if (n->type == CN_MAP) n->keys = xrealloc(n->keys, sizeof *n->keys * (size_t)n->cap);
+        n->vals = cm_xrealloc(n->vals, sizeof *n->vals * (size_t)n->cap);
+        if (n->type == CN_MAP) n->keys = cm_xrealloc(n->keys, sizeof *n->keys * (size_t)n->cap);
     }
     if (n->type == CN_MAP) n->keys[n->n] = key;
     n->vals[n->n++] = v;
 }
 
-void cnode_free(CNode *n) {
+void cm_cnode_free(CNode *n) {
     int i;
     if (!n) return;
     for (i = 0; i < n->n; i++) {
         if (n->type == CN_MAP) free(n->keys[i]);
-        cnode_free(n->vals[i]);
+        cm_cnode_free(n->vals[i]);
     }
     free(n->keys);
     free(n->vals);
@@ -35,7 +35,7 @@ void cnode_free(CNode *n) {
     free(n);
 }
 
-CNode *cnode_get(const CNode *map, const char *key) {
+CNode *cm_cnode_get(const CNode *map, const char *key) {
     int i;
     if (!map || map->type != CN_MAP) return NULL;
     for (i = map->n - 1; i >= 0; i--)
@@ -43,8 +43,8 @@ CNode *cnode_get(const CNode *map, const char *key) {
     return NULL;
 }
 
-const char *cnode_str(const CNode *map, const char *key) {
-    CNode *v = cnode_get(map, key);
+const char *cm_cnode_str(const CNode *map, const char *key) {
+    CNode *v = cm_cnode_get(map, key);
     return v && v->type == CN_STR ? v->str : NULL;
 }
 
@@ -63,7 +63,7 @@ typedef struct {
 } YParser;
 
 /* strip a trailing comment that is outside quotes */
-static void strip_comment(char *s) {
+static void drop_comment(char *s) {
     int dq = 0, sq = 0;
     char *p;
     for (p = s; *p; p++) {
@@ -85,8 +85,8 @@ static void strip_comment(char *s) {
 
 static char *yaml_scalar(const char *s) {
     Str o;
-    str_init(&o);
-    str_reserve(&o, 0);
+    cm_str_init(&o);
+    cm_str_reserve(&o, 0);
     while (*s == ' ') s++;
     if (*s == '"') {
         s++;
@@ -94,10 +94,10 @@ static char *yaml_scalar(const char *s) {
             if (*s == '\\' && s[1]) {
                 s++;
                 switch (*s) {
-                case 'n': str_putc(&o, '\n'); break;
-                case 't': str_putc(&o, '\t'); break;
-                case 'r': str_putc(&o, '\r'); break;
-                case '0': str_putc(&o, '\0'); break;
+                case 'n': cm_str_putc(&o, '\n'); break;
+                case 't': cm_str_putc(&o, '\t'); break;
+                case 'r': cm_str_putc(&o, '\r'); break;
+                case '0': cm_str_putc(&o, '\0'); break;
                 case 'x': case 'u': case 'U': {
                     int len = *s == 'x' ? 2 : *s == 'u' ? 4 : 8, v = 0, i;
                     char buf[4];
@@ -105,27 +105,27 @@ static char *yaml_scalar(const char *s) {
                         s++;
                         v = v * 16 + (isdigit((unsigned char)*s) ? *s - '0' : (tolower((unsigned char)*s) - 'a' + 10));
                     }
-                    str_putn(&o, buf, utf8_encode(v, buf));
+                    cm_str_putn(&o, buf, cm_utf8_encode(v, buf));
                     break;
                 }
-                default: str_putc(&o, *s); break;
+                default: cm_str_putc(&o, *s); break;
                 }
                 s++;
-            } else str_putc(&o, *s++);
+            } else cm_str_putc(&o, *s++);
         }
     } else if (*s == '\'') {
         s++;
         while (*s) {
             if (*s == '\'') {
-                if (s[1] == '\'') { str_putc(&o, '\''); s += 2; continue; }
+                if (s[1] == '\'') { cm_str_putc(&o, '\''); s += 2; continue; }
                 break;
             }
-            str_putc(&o, *s++);
+            cm_str_putc(&o, *s++);
         }
     } else {
-        str_puts(&o, s);
+        cm_str_puts(&o, s);
     }
-    return str_detach(&o);
+    return cm_str_detach(&o);
 }
 
 /* find "key: value" separator outside quotes; returns index of ':' or -1 */
@@ -168,7 +168,7 @@ static CNode *yaml_value_inline(const char *v) {
             } else {
                 while (*e && *e != ',' && *e != ']') e++;
             }
-            item = xstrndup(q, (size_t)(e - q));
+            item = cm_xstrndup(q, (size_t)(e - q));
             {
                 CNode *sn = cn_new(CN_STR);
                 sn->str = yaml_scalar(item);
@@ -195,7 +195,7 @@ static CNode *yaml_map(YParser *p, int indent) {
         if (l->text[0] == '-' && (l->text[1] == ' ' || l->text[1] == 0)) break;
         c = find_colon(l->text);
         if (c < 0) {
-            if (!p->err) p->err = xsprintf("expected 'key: value' in '%s'", l->text);
+            if (!p->err) p->err = cm_xsprintf("expected 'key: value' in '%s'", l->text);
             p->pos++;
             continue;
         }
@@ -255,23 +255,23 @@ static CNode *yaml_block(YParser *p, int indent) {
         /* multi-line plain/quoted scalar: join lines at this indentation */
         Str s;
         CNode *n;
-        str_init(&s);
-        str_reserve(&s, 0);
+        cm_str_init(&s);
+        cm_str_reserve(&s, 0);
         while (p->pos < p->n && p->lines[p->pos].indent >= indent &&
                find_colon(p->lines[p->pos].text) < 0) {
-            if (s.len) str_putc(&s, ' ');
-            str_puts(&s, p->lines[p->pos].text);
+            if (s.len) cm_str_putc(&s, ' ');
+            cm_str_puts(&s, p->lines[p->pos].text);
             p->pos++;
         }
         n = cn_new(CN_STR);
         n->str = yaml_scalar(s.s);
-        str_free(&s);
+        cm_str_free(&s);
         return n;
     }
     return yaml_map(p, indent);
 }
 
-CNode *yaml_parse(const char *text, char **err) {
+CNode *cm_yaml_parse(const char *text, char **err) {
     YParser p;
     CNode *root;
     const char *s = text;
@@ -280,14 +280,14 @@ CNode *yaml_parse(const char *text, char **err) {
     while (*s) {
         const char *e = strchr(s, '\n');
         size_t len = e ? (size_t)(e - s) : strlen(s);
-        char *line = xstrndup(s, len);
+        char *line = cm_xstrndup(s, len);
         int ind = 0;
         while (line[ind] == ' ') ind++;
-        strip_comment(line + ind);
+        drop_comment(line + ind);
         if (line[ind] && strcmp(line + ind, "---") != 0) {
-            if (p.n % 64 == 0) p.lines = xrealloc(p.lines, sizeof *p.lines * (size_t)(p.n + 64));
+            if (p.n % 64 == 0) p.lines = cm_xrealloc(p.lines, sizeof *p.lines * (size_t)(p.n + 64));
             p.lines[p.n].indent = ind;
-            p.lines[p.n].text = xstrdup(line + ind);
+            p.lines[p.n].text = cm_xstrdup(line + ind);
             p.n++;
         }
         free(line);
@@ -295,7 +295,7 @@ CNode *yaml_parse(const char *text, char **err) {
     }
     if (p.n == 0) root = cn_new(CN_MAP);
     else root = yaml_block(&p, p.lines[0].indent);
-    if (p.pos < p.n && !p.err) p.err = xsprintf("unexpected indentation near '%s'", p.lines[p.pos].text);
+    if (p.pos < p.n && !p.err) p.err = cm_xsprintf("unexpected indentation near '%s'", p.lines[p.pos].text);
     for (i = 0; i < p.n; i++) free(p.lines[i].text);
     free(p.lines);
     if (err) *err = p.err;
@@ -326,17 +326,17 @@ static void j_ws(JParser *j) {
 static char *j_string(JParser *j) {
     Str o;
     char q = *j->p++;
-    str_init(&o);
-    str_reserve(&o, 0);
+    cm_str_init(&o);
+    cm_str_reserve(&o, 0);
     while (*j->p && *j->p != q) {
         if (*j->p == '\\' && j->p[1]) {
             j->p++;
             switch (*j->p) {
-            case 'n': str_putc(&o, '\n'); break;
-            case 't': str_putc(&o, '\t'); break;
-            case 'r': str_putc(&o, '\r'); break;
-            case 'b': str_putc(&o, '\b'); break;
-            case 'f': str_putc(&o, '\f'); break;
+            case 'n': cm_str_putc(&o, '\n'); break;
+            case 't': cm_str_putc(&o, '\t'); break;
+            case 'r': cm_str_putc(&o, '\r'); break;
+            case 'b': cm_str_putc(&o, '\b'); break;
+            case 'f': cm_str_putc(&o, '\f'); break;
             case 'u': {
                 int v = 0, i;
                 char buf[4];
@@ -344,23 +344,23 @@ static char *j_string(JParser *j) {
                     j->p++;
                     v = v * 16 + (isdigit((unsigned char)*j->p) ? *j->p - '0' : tolower((unsigned char)*j->p) - 'a' + 10);
                 }
-                str_putn(&o, buf, utf8_encode(v, buf));
+                cm_str_putn(&o, buf, cm_utf8_encode(v, buf));
                 break;
             }
-            default: str_putc(&o, *j->p); break;
+            default: cm_str_putc(&o, *j->p); break;
             }
             j->p++;
-        } else str_putc(&o, *j->p++);
+        } else cm_str_putc(&o, *j->p++);
     }
     if (*j->p == q) j->p++;
-    else if (!j->err) j->err = xstrdup("unterminated string");
-    return str_detach(&o);
+    else if (!j->err) j->err = cm_xstrdup("unterminated string");
+    return cm_str_detach(&o);
 }
 
 static CNode *j_value(JParser *j, int depth) {
     CNode *n;
     j_ws(j);
-    if (depth > 100) { if (!j->err) j->err = xstrdup("nesting too deep"); return cn_new(CN_NULL); }
+    if (depth > 100) { if (!j->err) j->err = cm_xstrdup("nesting too deep"); return cn_new(CN_NULL); }
     if (*j->p == '{') {
         n = cn_new(CN_MAP);
         j->p++;
@@ -372,18 +372,18 @@ static CNode *j_value(JParser *j, int depth) {
             else {
                 const char *s = j->p;
                 while (*j->p && (isalnum((unsigned char)*j->p) || *j->p == '_' || *j->p == '$')) j->p++;
-                if (s == j->p) { if (!j->err) j->err = xstrdup("expected key"); break; }
-                k = xstrndup(s, (size_t)(j->p - s));
+                if (s == j->p) { if (!j->err) j->err = cm_xstrdup("expected key"); break; }
+                k = cm_xstrndup(s, (size_t)(j->p - s));
             }
             j_ws(j);
-            if (*j->p != ':') { free(k); if (!j->err) j->err = xstrdup("expected ':'"); break; }
+            if (*j->p != ':') { free(k); if (!j->err) j->err = cm_xstrdup("expected ':'"); break; }
             j->p++;
             cn_push(n, k, j_value(j, depth + 1));
             if (j->err) break;
             j_ws(j);
             if (*j->p == ',') { j->p++; continue; }
             if (*j->p == '}') { j->p++; break; }
-            if (!j->err) j->err = xstrdup("expected ',' or '}'");
+            if (!j->err) j->err = cm_xstrdup("expected ',' or '}'");
             break;
         }
         return n;
@@ -399,7 +399,7 @@ static CNode *j_value(JParser *j, int depth) {
             j_ws(j);
             if (*j->p == ',') { j->p++; continue; }
             if (*j->p == ']') { j->p++; break; }
-            if (!j->err) j->err = xstrdup("expected ',' or ']'");
+            if (!j->err) j->err = cm_xstrdup("expected ',' or ']'");
             break;
         }
         return n;
@@ -412,7 +412,7 @@ static CNode *j_value(JParser *j, int depth) {
     if (!strncmp(j->p, "true", 4) || !strncmp(j->p, "false", 5)) {
         n = cn_new(CN_BOOL);
         n->b = j->p[0] == 't';
-        n->str = xstrdup(n->b ? "true" : "false");
+        n->str = cm_xstrdup(n->b ? "true" : "false");
         j->p += n->b ? 4 : 5;
         return n;
     }
@@ -424,23 +424,23 @@ static CNode *j_value(JParser *j, int depth) {
         char *end;
         n = cn_new(CN_NUM);
         n->num = strtod(j->p, &end);
-        n->str = xstrndup(j->p, (size_t)(end - j->p));
-        if (end == j->p) { if (!j->err) j->err = xstrdup("bad number"); j->p++; }
+        n->str = cm_xstrndup(j->p, (size_t)(end - j->p));
+        if (end == j->p) { if (!j->err) j->err = cm_xstrdup("bad number"); j->p++; }
         j->p = end;
         return n;
     }
-    if (!j->err) j->err = xsprintf("unexpected character '%c'", *j->p ? *j->p : '?');
+    if (!j->err) j->err = cm_xsprintf("unexpected character '%c'", *j->p ? *j->p : '?');
     return cn_new(CN_NULL);
 }
 
-CNode *json_parse(const char *text, char **err) {
+CNode *cm_json_parse(const char *text, char **err) {
     JParser j;
     CNode *n;
     j.p = text;
     j.err = NULL;
     n = j_value(&j, 0);
     j_ws(&j);
-    if (!j.err && *j.p) j.err = xstrdup("trailing characters");
+    if (!j.err && *j.p) j.err = cm_xstrdup("trailing characters");
     if (err) *err = j.err;
     else free(j.err);
     return n;
@@ -451,26 +451,26 @@ CNode *json_parse(const char *text, char **err) {
 
 #include <stdio.h>
 
-CNode *cnode_new(int type) { return cn_new(type); }
+CNode *cm_cnode_new(int type) { return cn_new(type); }
 
-void cnode_set(CNode *map, const char *key, CNode *val) {
+void cm_cnode_set(CNode *map, const char *key, CNode *val) {
     int i;
     for (i = 0; i < map->n; i++) {
         if (!strcmp(map->keys[i], key)) {
-            cnode_free(map->vals[i]);
+            cm_cnode_free(map->vals[i]);
             map->vals[i] = val;
             return;
         }
     }
-    cn_push(map, xstrdup(key), val);
+    cn_push(map, cm_xstrdup(key), val);
 }
 
-void cnode_del(CNode *map, const char *key) {
+void cm_cnode_del(CNode *map, const char *key) {
     int i;
     for (i = 0; i < map->n; i++) {
         if (!strcmp(map->keys[i], key)) {
             free(map->keys[i]);
-            cnode_free(map->vals[i]);
+            cm_cnode_free(map->vals[i]);
             memmove(map->keys + i, map->keys + i + 1, sizeof(char *) * (size_t)(map->n - i - 1));
             memmove(map->vals + i, map->vals + i + 1, sizeof(CNode *) * (size_t)(map->n - i - 1));
             map->n--;
@@ -520,8 +520,8 @@ static void jw(FILE *f, const CNode *n, int ind) {
     }
 }
 
-int json_write_file(const char *path, const CNode *n) {
-    FILE *f = plat_fopen(path, "w");
+int cm_json_write_file(const char *path, const CNode *n) {
+    FILE *f = fopen(path, "w");
     if (!f) return -1;
     jw(f, n, 0);
     fputc('\n', f);

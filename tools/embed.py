@@ -3,17 +3,18 @@
 
 The generated file is checked in, so building the editor needs only a C
 compiler.  Run `make runtime` (or this script) after changing runtime files.
-Data is emitted as byte arrays rather than string literals so the result
-stays within ISO C99 translation limits (-pedantic clean)."""
+Data is emitted as byte arrays rather than string literals: C89 limits a
+string literal to 509 characters (Universal C rules, section 9).  C89 also
+only guarantees objects up to 32767 bytes, so larger files are rejected."""
 import os
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 KINDS = [
-    ("syntax", ".yaml", "rt_syntax_files"),
-    ("colorschemes", ".micro", "rt_colorscheme_files"),
-    ("help", ".md", "rt_help_files"),
+    ("syntax", ".yaml", "cm_rt_syntax_files"),
+    ("colorschemes", ".micro", "cm_rt_colorscheme_files"),
+    ("help", ".md", "cm_rt_help_files"),
 ]
 
 
@@ -26,6 +27,9 @@ def main():
         names = []
         for i, f in enumerate(files):
             data = open(os.path.join(path, f), "rb").read() + b"\0"
+            if len(data) > 32767:
+                sys.exit("%s/%s: %d bytes; C89 guarantees objects only up to 32767"
+                         % (d, f, len(data)))
             var = "%s_%d" % (table, i)
             out.append("static const char %s[] = {" % var)
             for j in range(0, len(data), 24):

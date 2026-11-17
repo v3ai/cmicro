@@ -19,15 +19,15 @@ typedef struct CNode {
     int n, cap;
 } CNode;
 
-CNode *yaml_parse(const char *text, char **err);
-CNode *json_parse(const char *text, char **err);
-void   cnode_free(CNode *n);
-CNode *cnode_get(const CNode *map, const char *key);
-const char *cnode_str(const CNode *map, const char *key); /* string value or NULL */
+CNode *cm_yaml_parse(const char *text, char **err);
+CNode *cm_json_parse(const char *text, char **err);
+void   cm_cnode_free(CNode *n);
+CNode *cm_cnode_get(const CNode *map, const char *key);
+const char *cm_cnode_str(const CNode *map, const char *key); /* string value or NULL */
 
-CNode *cnode_new(int type);
-void   cnode_set(CNode *map, const char *key, CNode *val); /* takes ownership of val */
-void   cnode_del(CNode *map, const char *key);
-int    json_write_file(const char *path, const CNode *n);
+CNode *cm_cnode_new(int type);
+void   cm_cnode_set(CNode *map, const char *key, CNode *val); /* takes ownership of val */
+void   cm_cnode_del(CNode *map, const char *key);
+int    cm_json_write_file(const char *path, const CNode *n);
 
 #endif

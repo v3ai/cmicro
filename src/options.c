@@ -19,7 +19,7 @@ static const char *const ch_reload[] = {"prompt", "auto", "disabled", NULL};
 static const char *const ch_truecolor[] = {"auto", "on", "off", NULL};
 static const char *const ch_encoding[] = {"utf-8", "utf8", NULL};
 
-const OptDef opt_defs[O_COUNT] = {
+const OptDef cm_opt_defs[O_COUNT] = {
     {"autoclose", OT_BOOL, "true", NULL, 0},
     {"autoindent", OT_BOOL, "true", NULL, 0},
     {"autosu", OT_BOOL, "false", NULL, 0},
@@ -103,19 +103,19 @@ const OptDef opt_defs[O_COUNT] = {
     {"xterm", OT_BOOL, "false", NULL, 0},
 };
 
-OptVal gopts[O_COUNT];
+OptVal cm_gopts[O_COUNT];
 static CNode *parsed; /* settings.json contents */
 static int parse_error; /* never overwrite a settings.json we failed to parse */
 
-int opt_find(const char *name) {
+int cm_opt_find(const char *name) {
     int i;
     for (i = 0; i < O_COUNT; i++)
-        if (!strcmp(opt_defs[i].name, name)) return i;
+        if (!strcmp(cm_opt_defs[i].name, name)) return i;
     return -1;
 }
 
-int opt_parse(int id, const char *value, OptVal *out, char **err) {
-    const OptDef *d = &opt_defs[id];
+int cm_opt_parse(int id, const char *value, OptVal *out, char **err) {
+    const OptDef *d = &cm_opt_defs[id];
     if (err) *err = NULL;
     out->i = 0;
     out->s = NULL;
@@ -123,17 +123,17 @@ int opt_parse(int id, const char *value, OptVal *out, char **err) {
     case OT_BOOL:
         if (!strcmp(value, "on") || !strcmp(value, "true")) out->i = 1;
         else if (!strcmp(value, "off") || !strcmp(value, "false")) out->i = 0;
-        else { if (err) *err = xstrdup("Invalid value"); return -1; }
+        else { if (err) *err = cm_xstrdup("Invalid value"); return -1; }
         return 0;
     case OT_INT: {
         char *end;
         double v = strtod(value, &end);
         if (end == value || *end || v != v || v > 1e9 || v < -1e9) {
-            if (err) *err = xstrdup("Invalid value");
+            if (err) *err = cm_xstrdup("Invalid value");
             return -1;
         }
-        if (d->nonneg == 1 && v < 0) { if (err) *err = xsprintf("%s must be non-negative", d->name); return -1; }
-        if (d->nonneg == 2 && v <= 0) { if (err) *err = xsprintf("%s must be positive", d->name); return -1; }
+        if (d->nonneg == 1 && v < 0) { if (err) *err = cm_xsprintf("%s must be non-negative", d->name); return -1; }
+        if (d->nonneg == 2 && v <= 0) { if (err) *err = cm_xsprintf("%s must be positive", d->name); return -1; }
         out->i = (int)v;
         return 0;
     }
@@ -143,29 +143,29 @@ int opt_parse(int id, const char *value, OptVal *out, char **err) {
             for (k = 0; d->choices[k]; k++) if (!strcmp(d->choices[k], value)) ok = 1;
             if (!ok) {
                 Str m;
-                str_init(&m);
-                str_printf(&m, "Invalid value for %s, choices are:", d->name);
-                for (k = 0; d->choices[k]; k++) str_printf(&m, " %s", d->choices[k]);
-                if (err) *err = str_detach(&m); else str_free(&m);
+                cm_str_init(&m);
+                cm_str_printf(&m, "Invalid value for %s, choices are:", d->name);
+                for (k = 0; d->choices[k]; k++) cm_str_printf(&m, " %s", d->choices[k]);
+                if (err) *err = cm_str_detach(&m); else cm_str_free(&m);
                 return -1;
             }
         }
-        out->s = xstrdup(value);
+        out->s = cm_xstrdup(value);
         return 0;
     }
 }
 
-char *opt_to_string(int id, const OptVal *v) {
-    switch (opt_defs[id].type) {
-    case OT_BOOL: return xstrdup(v->i ? "true" : "false");
-    case OT_INT: return xsprintf("%d", v->i);
-    default: return xstrdup(v->s ? v->s : "");
+char *cm_opt_to_string(int id, const OptVal *v) {
+    switch (cm_opt_defs[id].type) {
+    case OT_BOOL: return cm_xstrdup(v->i ? "true" : "false");
+    case OT_INT: return cm_xsprintf("%d", v->i);
+    default: return cm_xstrdup(v->s ? v->s : "");
     }
 }
 
-void opt_copy(int id, OptVal *dst, const OptVal *src) {
-    if (opt_defs[id].type == OT_STR) {
-        char *n = xstrdup(src->s ? src->s : "");
+void cm_opt_copy(int id, OptVal *dst, const OptVal *src) {
+    if (cm_opt_defs[id].type == OT_STR) {
+        char *n = cm_xstrdup(src->s ? src->s : "");
         free(dst->s);
         dst->s = n;
     } else {
@@ -173,47 +173,47 @@ void opt_copy(int id, OptVal *dst, const OptVal *src) {
     }
 }
 
-void options_init_defaults(void) {
+void cm_options_init_defaults(void) {
     int i;
     for (i = 0; i < O_COUNT; i++) {
         OptVal v;
-        opt_parse(i, i == O_FILEFORMAT ? plat_default_fileformat() : opt_defs[i].def, &v, NULL);
-        gopts[i] = v;
+        cm_opt_parse(i, cm_opt_defs[i].def, &v, NULL);
+        cm_gopts[i] = v;
     }
 }
 
 /* apply a JSON value to an OptVal */
 static int json_to_opt(int id, CNode *v, OptVal *out) {
     if (!v) return -1;
-    if (opt_defs[id].type == OT_BOOL && v->type == CN_BOOL) { out->i = v->b; out->s = NULL; return 0; }
-    if (opt_defs[id].type == OT_INT && v->type == CN_NUM) return opt_parse(id, v->str, out, NULL);
-    if (opt_defs[id].type == OT_INT && v->type == CN_BOOL && id == O_AUTOSAVE) {
+    if (cm_opt_defs[id].type == OT_BOOL && v->type == CN_BOOL) { out->i = v->b; out->s = NULL; return 0; }
+    if (cm_opt_defs[id].type == OT_INT && v->type == CN_NUM) return cm_opt_parse(id, v->str, out, NULL);
+    if (cm_opt_defs[id].type == OT_INT && v->type == CN_BOOL && id == O_AUTOSAVE) {
         out->i = v->b ? 8 : 0; out->s = NULL; return 0;
     }
     if (v->type == CN_STR || v->type == CN_NUM || v->type == CN_BOOL)
-        return opt_parse(id, v->str, out, NULL);
+        return cm_opt_parse(id, v->str, out, NULL);
     return -1;
 }
 
-void settings_load(void) {
+void cm_settings_load(void) {
     char *path, *text, *err = NULL;
     int i;
-    if (!config_dir) return;
-    path = xsprintf("%s/settings.json", config_dir);
-    text = read_file(path, NULL);
+    if (!cm_config_dir) return;
+    path = cm_xsprintf("%s/settings.json", cm_config_dir);
+    text = cm_read_file(path, NULL);
     free(path);
     if (!text) return;
-    if (starts_with(text, "null")) { free(text); return; }
-    parsed = json_parse(text, &err);
+    if (cm_starts_with(text, "null")) { free(text); return; }
+    parsed = cm_json_parse(text, &err);
     free(text);
     if (err) {
-        editor_set_error("Error reading settings.json: %s", err);
+        cm_editor_set_error("Error reading settings.json: %s", err);
         free(err);
         parse_error = 1;
     }
     if (!parsed || parsed->type != CN_MAP) {
         parse_error = 1;
-        cnode_free(parsed);
+        cm_cnode_free(parsed);
         parsed = NULL;
         return;
     }
@@ -221,18 +221,18 @@ void settings_load(void) {
         int id;
         OptVal v;
         if (parsed->vals[i]->type == CN_MAP) continue;
-        id = opt_find(parsed->keys[i]);
+        id = cm_opt_find(parsed->keys[i]);
         if (id < 0) continue;
         if (json_to_opt(id, parsed->vals[i], &v) == 0) {
-            if (opt_defs[id].type == OT_STR) free(gopts[id].s);
-            gopts[id] = v;
+            if (cm_opt_defs[id].type == OT_STR) free(cm_gopts[id].s);
+            cm_gopts[id] = v;
         } else {
-            editor_set_error("Error: setting '%s' has incorrect type, using default value", parsed->keys[i]);
+            cm_editor_set_error("Error: setting '%s' has incorrect type, using default value", parsed->keys[i]);
         }
     }
 }
 
-void settings_apply_parsed(struct Buffer *b, const char *path) {
+void cm_settings_apply_parsed(struct Buffer *b, const char *path) {
     int i, k;
     if (!parsed) return;
     for (i = 0; i < parsed->n; i++) {
@@ -240,22 +240,22 @@ void settings_apply_parsed(struct Buffer *b, const char *path) {
         const char *key = parsed->keys[i];
         int match = 0;
         if (m->type != CN_MAP) continue;
-        if (starts_with(key, "ft:")) {
+        if (cm_starts_with(key, "ft:")) {
             match = !strcmp(key + 3, BOPTS(b, O_FILETYPE));
         } else {
-            const char *g = starts_with(key, "glob:") ? key + 5 : key;
+            const char *g = cm_starts_with(key, "glob:") ? key + 5 : key;
             if (path && *path) {
                 char *ap = b->abspath ? b->abspath : (char *)path;
-                match = glob_match(g, path) || glob_match(g, ap) || glob_match(g, path_base(path));
+                match = cm_glob_match(g, path) || cm_glob_match(g, ap) || cm_glob_match(g, cm_path_base(path));
             }
         }
         if (!match) continue;
         for (k = 0; k < m->n; k++) {
-            int id = opt_find(m->keys[k]);
+            int id = cm_opt_find(m->keys[k]);
             OptVal v;
             if (id < 0 || id >= O_FIRST_GLOBAL) continue;
             if (json_to_opt(id, m->vals[k], &v) == 0) {
-                buf_set_option(b, id, &v, 1);
+                cm_buf_set_option(b, id, &v, 1);
                 free(v.s);
             }
         }
@@ -278,7 +278,7 @@ static void json_write(FILE *f, CNode *n, int ind) {
     int i, j;
     switch (n->type) {
     case CN_MAP: {
-        int *ord = xmalloc(sizeof(int) * (size_t)(n->n + 1));
+        int *ord = cm_xmalloc(sizeof(int) * (size_t)(n->n + 1));
         for (i = 0; i < n->n; i++) ord[i] = i;
         for (i = 1; i < n->n; i++)
             for (j = i; j > 0 && strcmp(n->keys[ord[j - 1]], n->keys[ord[j]]) > 0; j--) {
@@ -311,47 +311,48 @@ static void json_write(FILE *f, CNode *n, int ind) {
     }
 }
 
-static CNode *mknode(int type) { CNode *n = xcalloc(1, sizeof *n); n->type = type; return n; }
+static CNode *mknode(int type) { CNode *n = cm_xcalloc(1, sizeof *n); n->type = type; return n; }
 
-void settings_note_set(const char *name, const char *value) {
-    int id = opt_find(name), i;
+void cm_settings_note_set(const char *name, const char *value) {
+    int id = cm_opt_find(name), i;
     CNode *v;
     if (id < 0) return;
     if (!parsed) parsed = mknode(CN_MAP);
-    if (opt_defs[id].type == OT_BOOL) {
+    if (cm_opt_defs[id].type == OT_BOOL) {
         v = mknode(CN_BOOL);
         v->b = !strcmp(value, "on") || !strcmp(value, "true");
-        v->str = xstrdup(v->b ? "true" : "false");
-    } else if (opt_defs[id].type == OT_INT) {
+        v->str = cm_xstrdup(v->b ? "true" : "false");
+    } else if (cm_opt_defs[id].type == OT_INT) {
+        int k = cm_clamped_atoi(value);
         v = mknode(CN_NUM);
-        v->num = atof(value);
-        v->str = xsprintf("%d", (int)v->num);
+        v->num = k;
+        v->str = cm_xsprintf("%d", k);
     } else {
         v = mknode(CN_STR);
-        v->str = xstrdup(value);
+        v->str = cm_xstrdup(value);
     }
     for (i = 0; i < parsed->n; i++) {
         if (!strcmp(parsed->keys[i], name)) {
-            cnode_free(parsed->vals[i]);
+            cm_cnode_free(parsed->vals[i]);
             parsed->vals[i] = v;
             return;
         }
     }
-    parsed->keys = xrealloc(parsed->keys, sizeof(char *) * (size_t)(parsed->n + 1));
-    parsed->vals = xrealloc(parsed->vals, sizeof(CNode *) * (size_t)(parsed->n + 1));
+    parsed->keys = cm_xrealloc(parsed->keys, sizeof(char *) * (size_t)(parsed->n + 1));
+    parsed->vals = cm_xrealloc(parsed->vals, sizeof(CNode *) * (size_t)(parsed->n + 1));
     parsed->cap = parsed->n + 1;
-    parsed->keys[parsed->n] = xstrdup(name);
+    parsed->keys[parsed->n] = cm_xstrdup(name);
     parsed->vals[parsed->n] = v;
     parsed->n++;
 }
 
-void settings_note_reset(const char *name) {
+void cm_settings_note_reset(const char *name) {
     int i;
     if (!parsed) return;
     for (i = 0; i < parsed->n; i++) {
         if (!strcmp(parsed->keys[i], name)) {
             free(parsed->keys[i]);
-            cnode_free(parsed->vals[i]);
+            cm_cnode_free(parsed->vals[i]);
             memmove(parsed->keys + i, parsed->keys + i + 1, sizeof(char *) * (size_t)(parsed->n - i - 1));
             memmove(parsed->vals + i, parsed->vals + i + 1, sizeof(CNode *) * (size_t)(parsed->n - i - 1));
             parsed->n--;
@@ -360,13 +361,13 @@ void settings_note_reset(const char *name) {
     }
 }
 
-int settings_save(void) {
+int cm_settings_save(void) {
     char *path;
     FILE *f;
-    if (!config_dir || !parsed) return 0;
+    if (!cm_config_dir || !parsed) return 0;
     if (parse_error) return -1;
-    path = xsprintf("%s/settings.json", config_dir);
-    f = plat_fopen(path, "w");
+    path = cm_xsprintf("%s/settings.json", cm_config_dir);
+    f = fopen(path, "w");
     free(path);
     if (!f) return -1;
     json_write(f, parsed, 0);

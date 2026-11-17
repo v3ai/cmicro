@@ -13,13 +13,13 @@ typedef struct {
     const char *data;
 } RtFile;
 
-extern const RtFile rt_syntax_files[];
-extern const RtFile rt_colorscheme_files[];
-extern const RtFile rt_help_files[];
+extern const RtFile cm_rt_syntax_files[];
+extern const RtFile cm_rt_colorscheme_files[];
+extern const RtFile cm_rt_help_files[];
 
-extern char *config_dir; /* ~/.config/micro (no trailing slash) */
+extern char *cm_config_dir; /* ~/.config/micro (no trailing slash) */
 
-char  *runtime_read(int kind, const char *name); /* malloc'd content or NULL */
-char **runtime_list(int kind);                   /* malloc'd names, NULL-terminated */
+char  *cm_runtime_read(int kind, const char *name); /* malloc'd content or NULL */
+char **cm_runtime_list(int kind);                   /* malloc'd names, NULL-terminated */
 
 #endif

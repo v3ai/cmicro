@@ -62,9 +62,8 @@ and history (Up / Down).
 
 * `showkey 'key'`: shows the action(s) bound to a given key.
 
-* `run 'sh-command'`: runs the given shell command (`sh` on Unix, `cmd.exe`
-  on Windows). The command's output will be displayed in one line when it
-  finishes running.
+* `run 'sh-command'`: runs the given shell command with `sh`. The command's
+  output will be displayed in one line when it finishes running.
 
 * `vsplit 'filename'`: opens a vertical split with `filename`. If no
   filename is provided, a vertical split is opened with an empty buffer.

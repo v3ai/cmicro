@@ -23,41 +23,41 @@ static char **groups;
 static Style *gstyles;
 static int ngroups, cgroups;
 
-int group_id(const char *name) {
+int cm_group_id(const char *name) {
     int i;
     if (!name || !*name) return 0;
     if (ngroups == 0) {
         cgroups = 64;
-        groups = xmalloc(sizeof *groups * (size_t)cgroups);
-        gstyles = xmalloc(sizeof *gstyles * (size_t)cgroups);
-        groups[0] = xstrdup("");
-        gstyles[0] = def_style;
+        groups = cm_xmalloc(sizeof *groups * (size_t)cgroups);
+        gstyles = cm_xmalloc(sizeof *gstyles * (size_t)cgroups);
+        groups[0] = cm_xstrdup("");
+        gstyles[0] = cm_def_style;
         ngroups = 1;
     }
     for (i = 1; i < ngroups; i++)
         if (!strcmp(groups[i], name)) return i;
     if (ngroups == cgroups) {
         cgroups *= 2;
-        groups = xrealloc(groups, sizeof *groups * (size_t)cgroups);
-        gstyles = xrealloc(gstyles, sizeof *gstyles * (size_t)cgroups);
+        groups = cm_xrealloc(groups, sizeof *groups * (size_t)cgroups);
+        gstyles = cm_xrealloc(gstyles, sizeof *gstyles * (size_t)cgroups);
     }
-    groups[ngroups] = xstrdup(name);
-    gstyles[ngroups] = color_get(name);
+    groups[ngroups] = cm_xstrdup(name);
+    gstyles[ngroups] = cm_color_get(name);
     return ngroups++;
 }
 
-const char *group_name(int id) { return id > 0 && id < ngroups ? groups[id] : ""; }
-int group_count(void) { return ngroups; }
+const char *cm_group_name(int id) { return id > 0 && id < ngroups ? groups[id] : ""; }
+int cm_group_count(void) { return ngroups; }
 
-void group_styles_refresh(void) {
+void cm_group_styles_refresh(void) {
     int i;
-    if (ngroups == 0) group_id("default");
-    gstyles[0] = def_style;
-    for (i = 1; i < ngroups; i++) gstyles[i] = color_get(groups[i]);
+    if (ngroups == 0) cm_group_id("default");
+    gstyles[0] = cm_def_style;
+    for (i = 1; i < ngroups; i++) gstyles[i] = cm_color_get(groups[i]);
 }
 
-Style group_style(int id) {
-    if (id <= 0 || id >= ngroups) return def_style;
+Style cm_group_style(int id) {
+    if (id <= 0 || id >= ngroups) return cm_def_style;
     return gstyles[id];
 }
 
@@ -71,57 +71,57 @@ static Regex *compile_or_null(const char *pat) {
     char *err = NULL;
     Regex *re;
     if (!pat) return NULL;
-    re = re_compile(pat, 0, &err);
+    re = cm_re_compile(pat, 0, &err);
     free(err);
     return re;
 }
 
-void syntax_init(void) {
-    char **names = runtime_list(RT_SYNTAX);
+void cm_syntax_init(void) {
+    char **names = cm_runtime_list(RT_SYNTAX);
     int i;
-    group_id("default");
+    cm_group_id("default");
     for (i = 0; names[i]; i++) {
-        char *text = runtime_read(RT_SYNTAX, names[i]);
+        char *text = cm_runtime_read(RT_SYNTAX, names[i]);
         CNode *root, *det;
         const char *ft;
         Syntax *s;
         if (!text) continue;
-        root = yaml_parse(text, NULL);
+        root = cm_yaml_parse(text, NULL);
         free(text);
-        ft = cnode_str(root, "filetype");
-        if (!ft) { cnode_free(root); continue; }
-        s = xcalloc(1, sizeof *s);
-        s->filetype = xstrdup(ft);
-        s->file = xstrdup(names[i]);
-        det = cnode_get(root, "detect");
+        ft = cm_cnode_str(root, "filetype");
+        if (!ft) { cm_cnode_free(root); continue; }
+        s = cm_xcalloc(1, sizeof *s);
+        s->filetype = cm_xstrdup(ft);
+        s->file = cm_xstrdup(names[i]);
+        det = cm_cnode_get(root, "detect");
         if (det) {
-            const char *f = cnode_str(det, "filename");
+            const char *f = cm_cnode_str(det, "filename");
             if (f && *f) s->fname = compile_or_null(f);
-            s->header = compile_or_null(cnode_str(det, "header"));
-            s->signature = compile_or_null(cnode_str(det, "signature"));
+            s->header = compile_or_null(cm_cnode_str(det, "header"));
+            s->signature = compile_or_null(cm_cnode_str(det, "signature"));
         }
-        cnode_free(root);
+        cm_cnode_free(root);
         if (!strcmp(names[i], "default")) { default_syntax = s; continue; }
-        syntaxes = xrealloc(syntaxes, sizeof *syntaxes * (size_t)(nsyntax + 1));
+        syntaxes = cm_xrealloc(syntaxes, sizeof *syntaxes * (size_t)(nsyntax + 1));
         syntaxes[nsyntax++] = s;
     }
-    free_strv(names);
+    cm_free_strv(names);
 }
 
-char **syntax_filetypes(void) {
-    char **v = xmalloc(sizeof *v * (size_t)(nsyntax + 2));
+char **cm_syntax_filetypes(void) {
+    char **v = cm_xmalloc(sizeof *v * (size_t)(nsyntax + 2));
     int i, n = 0, j;
     for (i = 0; i < nsyntax; i++) {
         int dup = 0;
         for (j = 0; j < n; j++) if (!strcmp(v[j], syntaxes[i]->filetype)) dup = 1;
-        if (!dup) v[n++] = xstrdup(syntaxes[i]->filetype);
+        if (!dup) v[n++] = cm_xstrdup(syntaxes[i]->filetype);
     }
-    v[n++] = xstrdup("off");
+    v[n++] = cm_xstrdup("off");
     v[n] = NULL;
     return v;
 }
 
-Syntax *syntax_by_filetype(const char *ft) {
+Syntax *cm_syntax_by_filetype(const char *ft) {
     int i;
     if (!ft) return NULL;
     for (i = 0; i < nsyntax; i++)
@@ -130,20 +130,20 @@ Syntax *syntax_by_filetype(const char *ft) {
     return NULL;
 }
 
-Syntax *syntax_detect(const char *path, const char *firstline, const char **lines, int nlines,
+Syntax *cm_syntax_detect(const char *path, const char *firstline, const char **lines, int nlines,
                       int detectlimit) {
-    Syntax **fm = xmalloc(sizeof *fm * (size_t)(nsyntax + 1));
-    Syntax **hm = xmalloc(sizeof *hm * (size_t)(nsyntax + 1));
+    Syntax **fm = cm_xmalloc(sizeof *fm * (size_t)(nsyntax + 1));
+    Syntax **hm = cm_xmalloc(sizeof *hm * (size_t)(nsyntax + 1));
     int nf = 0, nh = 0, i, k;
     Syntax *res = NULL, **m;
     int nm;
-    const char *base = path ? path_base(path) : "";
+    const char *base = path ? cm_path_base(path) : "";
     for (i = 0; i < nsyntax; i++) {
         Syntax *s = syntaxes[i];
         if (path && *path && s->fname &&
-            (re_match_str(s->fname, path) || re_match_str(s->fname, base))) {
+            (cm_re_match_str(s->fname, path) || cm_re_match_str(s->fname, base))) {
             fm[nf++] = s;
-        } else if (nf == 0 && s->header && firstline && re_match_str(s->header, firstline)) {
+        } else if (nf == 0 && s->header && firstline && cm_re_match_str(s->header, firstline)) {
             hm[nh++] = s;
         }
     }
@@ -156,7 +156,7 @@ Syntax *syntax_detect(const char *path, const char *firstline, const char **line
         for (i = 0; i < nm && !res; i++) {
             if (!m[i]->signature) continue;
             for (k = 0; k < limit; k++)
-                if (re_match_str(m[i]->signature, lines[k])) { res = m[i]; break; }
+                if (cm_re_match_str(m[i]->signature, lines[k])) { res = m[i]; break; }
         }
         if (!res) res = m[0];
     }
@@ -168,14 +168,14 @@ Syntax *syntax_detect(const char *path, const char *firstline, const char **line
 /* ---------------- rule parsing ---------------- */
 
 static void rules_add_pattern(Rules *r, int group, Regex *re) {
-    r->pats = xrealloc(r->pats, sizeof *r->pats * (size_t)(r->npats + 1));
+    r->pats = cm_xrealloc(r->pats, sizeof *r->pats * (size_t)(r->npats + 1));
     r->pats[r->npats].group = group;
     r->pats[r->npats].re = re;
     r->npats++;
 }
 
 static void rules_add_region(Rules *r, Region *reg) {
-    r->regions = xrealloc(r->regions, sizeof *r->regions * (size_t)(r->nregions + 1));
+    r->regions = cm_xrealloc(r->regions, sizeof *r->regions * (size_t)(r->nregions + 1));
     r->regions[r->nregions++] = reg;
 }
 
@@ -183,7 +183,7 @@ static void copy_rules(const Rules *src, Rules *dst, Region *parent) {
     int i;
     for (i = 0; i < src->npats; i++) rules_add_pattern(dst, src->pats[i].group, src->pats[i].re);
     for (i = 0; i < src->nregions; i++) {
-        Region *o = src->regions[i], *n = xcalloc(1, sizeof *n);
+        Region *o = src->regions[i], *n = cm_xcalloc(1, sizeof *n);
         n->group = o->group;
         n->limit_group = o->limit_group;
         n->start = o->start;
@@ -209,47 +209,47 @@ static int parse_rules(Syntax *syn, CNode *list, Rules *out, Region *parent, cha
             if (!strcmp(key, "include")) {
                 Syntax *inc;
                 if (v->type != CN_STR) continue;
-                inc = syntax_by_filetype(v->str);
+                inc = cm_syntax_by_filetype(v->str);
                 if (inc && inc != syn && load_depth < 8) {
                     load_depth++;
-                    if (syntax_load(inc, NULL) == 0) copy_rules(&inc->rules, out, parent);
+                    if (cm_syntax_load(inc, NULL) == 0) copy_rules(&inc->rules, out, parent);
                     load_depth--;
                 }
             } else if (v->type == CN_STR) {
                 char *e = NULL;
-                Regex *re = re_compile(v->str, 0, &e);
+                Regex *re = cm_re_compile(v->str, 0, &e);
                 if (!re) {
-                    if (err && !*err) *err = xsprintf("%s: %s: %s", syn->file, key, e);
+                    if (err && !*err) *err = cm_xsprintf("%s: %s: %s", syn->file, key, e);
                     free(e);
                     continue;
                 }
-                rules_add_pattern(out, group_id(key), re);
+                rules_add_pattern(out, cm_group_id(key), re);
             } else if (v->type == CN_MAP) {
-                Region *r = xcalloc(1, sizeof *r);
+                Region *r = cm_xcalloc(1, sizeof *r);
                 const char *s;
                 char *e = NULL;
-                r->group = group_id(key);
-                s = cnode_str(v, "limit-group");
-                r->limit_group = s ? group_id(s) : r->group;
+                r->group = cm_group_id(key);
+                s = cm_cnode_str(v, "limit-group");
+                r->limit_group = s ? cm_group_id(s) : r->group;
                 r->parent = parent;
-                s = cnode_str(v, "start");
-                if (s && *s) r->start = re_compile(s, 0, &e);
+                s = cm_cnode_str(v, "start");
+                if (s && *s) r->start = cm_re_compile(s, 0, &e);
                 free(e); e = NULL;
-                s = cnode_str(v, "end");
-                if (s && *s) r->end = re_compile(s, 0, &e);
+                s = cm_cnode_str(v, "end");
+                if (s && *s) r->end = cm_re_compile(s, 0, &e);
                 free(e); e = NULL;
-                s = cnode_str(v, "skip");
-                if (s && *s) r->skip = re_compile(s, 0, &e);
+                s = cm_cnode_str(v, "skip");
+                if (s && *s) r->skip = cm_re_compile(s, 0, &e);
                 free(e);
                 if (!r->start || !r->end) {
-                    if (err && !*err) *err = xsprintf("%s: bad region %s", syn->file, key);
-                    re_free(r->start);
-                    re_free(r->end);
-                    re_free(r->skip);
+                    if (err && !*err) *err = cm_xsprintf("%s: bad region %s", syn->file, key);
+                    cm_re_free(r->start);
+                    cm_re_free(r->end);
+                    cm_re_free(r->skip);
                     free(r);
                     continue;
                 }
-                parse_rules(syn, cnode_get(v, "rules"), &r->rules, r, err);
+                parse_rules(syn, cm_cnode_get(v, "rules"), &r->rules, r, err);
                 rules_add_region(out, r);
             }
         }
@@ -257,19 +257,19 @@ static int parse_rules(Syntax *syn, CNode *list, Rules *out, Region *parent, cha
     return 0;
 }
 
-int syntax_load(Syntax *s, char **err) {
+int cm_syntax_load(Syntax *s, char **err) {
     char *text;
     CNode *root;
     if (err) *err = NULL;
     if (!s) return -1;
     if (s->loaded) return s->failed ? -1 : 0;
     s->loaded = 1; /* also guards include cycles */
-    text = runtime_read(RT_SYNTAX, s->file);
+    text = cm_runtime_read(RT_SYNTAX, s->file);
     if (!text) { s->failed = 1; return -1; }
-    root = yaml_parse(text, NULL);
+    root = cm_yaml_parse(text, NULL);
     free(text);
-    parse_rules(s, cnode_get(root, "rules"), &s->rules, NULL, err);
-    cnode_free(root);
+    parse_rules(s, cm_cnode_get(root, "rules"), &s->rules, NULL, err);
+    cm_cnode_free(root);
     return 0;
 }
 
@@ -296,7 +296,7 @@ static const char *masked_from(Regex *skip, const char *line, int off, int len, 
     for (i = 0; i < nskm; i++) {
         if (skm[i].skip != skip) continue;
         slot = i;
-        if (re_context_free(skip) && skm[i].from <= off && !skm[i].in[off]) {
+        if (cm_re_context_free(skip) && skm[i].from <= off && !skm[i].in[off]) {
             *gen = skm[i].gen;
             return skm[i].m + off;
         }
@@ -306,21 +306,21 @@ static const char *masked_from(Regex *skip, const char *line, int off, int len, 
     k = &skm[slot];
     if (k->cap < len + 1) {
         k->cap = len + 64;
-        k->m = xrealloc(k->m, (size_t)k->cap);
-        k->in = xrealloc(k->in, (size_t)k->cap);
+        k->m = cm_xrealloc(k->m, (size_t)k->cap);
+        k->in = cm_xrealloc(k->in, (size_t)k->cap);
     }
     k->skip = skip;
     k->from = off;
     k->gen = ++skm_gen;
     memcpy(k->m + off, sub, (size_t)n);
     memset(k->in + off, 0, (size_t)n + 1);
-    while (pos <= n && re_search(skip, sub, n, pos, caps, 1)) {
+    while (pos <= n && cm_re_search(skip, sub, n, pos, caps, 1)) {
         if (caps[1] > caps[0]) {
             memset(k->m + off + caps[0], 1, (size_t)(caps[1] - caps[0]));
             if (caps[1] - caps[0] > 1) memset(k->in + off + caps[0] + 1, 1, (size_t)(caps[1] - caps[0] - 1));
             pos = caps[1];
         } else {
-            pos = caps[1] < n ? utf8_next(sub, n, caps[1]) : n + 1;
+            pos = caps[1] < n ? cm_utf8_next(sub, n, caps[1]) : n + 1;
         }
     }
     *gen = k->gen;
@@ -334,7 +334,7 @@ static int find_index_gen(Regex *re, Regex *skip, const char *s, int off, int le
     int n = len - off, caps[2];
     *gen = 0;
     if (skip) sub = masked_from(skip, s, off, len, gen);
-    if (!re_search(re, sub, n, 0, caps, 1)) return 0;
+    if (!cm_re_search(re, sub, n, 0, caps, 1)) return 0;
     *ms = caps[0];
     *me = caps[1];
     return 1;
@@ -360,7 +360,7 @@ static int nscache;
 
 static int find_start(Region *r, const char *line, int off, int len, int *ms, int *me) {
     int i, s = 0, e = 0, found, gen = 0;
-    if (!re_context_free(r->start)) return find_index(r->start, r->skip, line, off, len, ms, me);
+    if (!cm_re_context_free(r->start)) return find_index(r->start, r->skip, line, off, len, ms, me);
     for (i = 0; i < nscache; i++) {
         StartCache *c = &scache[i];
         if (c->re == r->start && c->skip == r->skip && c->from <= off) {
@@ -412,7 +412,7 @@ static int npcache;
 
 static int pat_search(Regex *re, const char *line, int off, int end, int pos, int *ms, int *me) {
     int i, caps[2], found, apos = off + pos;
-    int cf = re_context_free(re);
+    int cf = cm_re_context_free(re);
     if (cf) {
         for (i = 0; i < npcache; i++) {
             PatCache *c = &pcache[i];
@@ -429,7 +429,7 @@ static int pat_search(Regex *re, const char *line, int off, int end, int pos, in
     } else {
         i = 128;
     }
-    found = re_search(re, line + off, end - off, pos, caps, 1);
+    found = cm_re_search(re, line + off, end - off, pos, caps, 1);
     if (cf) {
         if (i == npcache && npcache < 128) npcache++;
         if (i < 128) {
@@ -460,7 +460,7 @@ static void apply_patterns(const Rules *r, const char *s, int off, int end, unsi
             if (limit_end >= 0 && ms >= limit_end) break; /* later matches are discarded anyway */
             if (me == ms) {
                 if (ms == prev_end) accept = 0;
-                pos = me < n ? utf8_next(sub, n, me) : n + 1;
+                pos = me < n ? cm_utf8_next(sub, n, me) : n + 1;
             } else {
                 pos = me;
             }
@@ -470,7 +470,7 @@ static void apply_patterns(const Rules *r, const char *s, int off, int end, unsi
     }
 }
 
-Region *syntax_highlight_line(Syntax *syn, Region *cur, const char *line, int len,
+Region *cm_syntax_highlight_line(Syntax *syn, Region *cur, const char *line, int len,
                               unsigned short *hl) {
     int off = 0, iter = 0;
     nscache = 0;

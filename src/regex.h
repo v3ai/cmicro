@@ -14,23 +14,23 @@
 
 typedef struct Regex Regex;
 
-Regex *re_compile(const char *pattern, int flags, char **err); /* err: malloc'd message */
-void   re_free(Regex *re);
-int    re_ncaps(const Regex *re); /* number of capture groups incl. group 0 */
+Regex *cm_re_compile(const char *pattern, int flags, char **err); /* err: malloc'd message */
+void   cm_re_free(Regex *re);
+int    cm_re_ncaps(const Regex *re); /* number of capture groups incl. group 0 */
 
 /* Search s[start..len) for the leftmost match.  '^' matches only at
  * offset 0 of s, '$' only at len (unless (?m)).  On success fills
  * caps[0..2*ncap) (-1 for unmatched groups) and returns 1. */
-int re_search(const Regex *re, const char *s, int len, int start, int *caps, int ncap);
+int cm_re_search(const Regex *re, const char *s, int len, int start, int *caps, int ncap);
 
 /* 1 if matches never depend on where the subject string begins (no ^, \A,
    \b or \B), so a search result from an earlier offset can be reused */
-int re_context_free(const Regex *re);
+int cm_re_context_free(const Regex *re);
 
 /* convenience: match anywhere in NUL-terminated string */
-int re_match_str(const Regex *re, const char *s);
+int cm_re_match_str(const Regex *re, const char *s);
 
 /* quote metacharacters (malloc'd) */
-char *re_quote(const char *s);
+char *cm_re_quote(const char *s);
 
 #endif

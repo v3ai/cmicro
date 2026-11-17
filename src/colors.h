@@ -2,8 +2,10 @@
 #define COLORS_H
 
 #define COLOR_DEFAULT (-1)
-#define COLOR_RGB(r, g, b) ((1 << 24) | ((r) << 16) | ((g) << 8) | (b))
-#define COLOR_IS_RGB(c) ((c) >= (1 << 24))
+/* 24-bit colors are stored as 0x1RRGGBB; r, g and b must be 0..255 */
+#define COLOR_RGB(r, g, b) \
+    ((int)(0x1000000UL | ((unsigned long)(r) << 16) | ((unsigned long)(g) << 8) | (unsigned long)(b)))
+#define COLOR_IS_RGB(c) ((c) >= 0x1000000L)
 
 enum {
     ATTR_BOLD = 1,
@@ -20,15 +22,15 @@ typedef struct {
     unsigned attr;
 } Style;
 
-extern Style def_style;
+extern Style cm_def_style;
 
-int   style_eq(Style a, Style b);
-Style style_reverse(Style s);
+int   cm_style_eq(Style a, Style b);
+Style cm_style_reverse(Style s);
 
 /* colorscheme */
-int   colorscheme_load(const char *name, char **err); /* 0 on success */
-Style color_get(const char *group);         /* with "a.b.c" -> "a.b" -> "a" fallback */
-int   color_has(const char *group);          /* exact link exists */
-char **colorscheme_list(void);              /* malloc'd, NULL-terminated */
+int   cm_colorscheme_load(const char *name, char **err); /* 0 on success */
+Style cm_color_get(const char *group);         /* with "a.b.c" -> "a.b" -> "a" fallback */
+int   cm_color_has(const char *group);          /* exact link exists */
+char **cm_colorscheme_list(void);              /* malloc'd, NULL-terminated */
 
 #endif

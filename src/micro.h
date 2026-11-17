@@ -21,8 +21,8 @@ typedef struct {
     int x, y; /* x: byte offset within line (always on a UTF-8 boundary) */
 } Loc;
 
-int loc_cmp(Loc a, Loc b);
-Loc loc_make(int x, int y);
+int cm_loc_cmp(Loc a, Loc b);
+Loc cm_loc_make(int x, int y);
 
 /* ================================================================== */
 /* Options                                                             */
@@ -63,22 +63,22 @@ typedef struct {
     char *s; /* string */
 } OptVal;
 
-extern const OptDef opt_defs[O_COUNT];
-extern OptVal gopts[O_COUNT];
+extern const OptDef cm_opt_defs[O_COUNT];
+extern OptVal cm_gopts[O_COUNT];
 
-#define GOPT(id) (gopts[id].i)
-#define GOPTS(id) (gopts[id].s)
+#define GOPT(id) (cm_gopts[id].i)
+#define GOPTS(id) (cm_gopts[id].s)
 
-int   opt_find(const char *name);
-int   opt_parse(int id, const char *value, OptVal *out, char **err);
-char *opt_to_string(int id, const OptVal *v);
-void  opt_copy(int id, OptVal *dst, const OptVal *src);
-void  options_init_defaults(void);
-void  settings_load(void);      /* settings.json */
-int   settings_save(void);      /* write non-default globals to settings.json */
-void  settings_note_set(const char *name, const char *value); /* remember for saving */
-void  settings_note_reset(const char *name);
-void  settings_apply_parsed(struct Buffer *b, const char *path); /* ft: and glob: sections */
+int   cm_opt_find(const char *name);
+int   cm_opt_parse(int id, const char *value, OptVal *out, char **err);
+char *cm_opt_to_string(int id, const OptVal *v);
+void  cm_opt_copy(int id, OptVal *dst, const OptVal *src);
+void  cm_options_init_defaults(void);
+void  cm_settings_load(void);      /* settings.json */
+int   cm_settings_save(void);      /* write non-default globals to settings.json */
+void  cm_settings_note_set(const char *name, const char *value); /* remember for saving */
+void  cm_settings_note_reset(const char *name);
+void  cm_settings_apply_parsed(struct Buffer *b, const char *path); /* ft: and glob: sections */
 
 /* ================================================================== */
 /* Buffer                                                              */
@@ -93,14 +93,14 @@ typedef struct Line {
     int match_valid;
 } Line;
 
-enum { EV_INSERT, EV_REMOVE };
+enum { TE_INSERT, TE_REMOVE };
 
 typedef struct TextEvent {
     int type;
     Loc start, end;
     char *text;
     int len;
-    long long time;
+    p_s64 stamp; /* cm_plat_now_ms() when recorded */
     int id;
     Loc cursor;  /* position of the editing cursor before the event */
     int cnum;    /* index of that cursor (micro's t.C.Num) */
@@ -130,49 +130,49 @@ typedef struct Buffer {
     char *last_search;
     int last_search_regex;
     int hl_search;
-    long long mtime;
+    p_s64 mtime;
     int refs;
     int is_new;
     int bom;
-    long long autosave_at;
+    p_s64 autosave_at;
 } Buffer;
 
 #define BOPT(b, id) ((b)->opts[id].i)
 #define BOPTS(b, id) ((b)->opts[id].s)
 
-Buffer *buf_new_empty(void);
-Buffer *buf_from_string(const char *name, const char *text, int type);
-Buffer *buf_open(const char *path, char **err);
-void    buf_free(Buffer *b);
-int     buf_save(Buffer *b, const char *path, char **err);
-int     buf_reload(Buffer *b, char **err);
-int     buf_modified(const Buffer *b);
-void    buf_set_name(Buffer *b, const char *path);
-void    buf_set_text(Buffer *b, const char *text, int len);
+Buffer *cm_buf_new_empty(void);
+Buffer *cm_buf_from_string(const char *name, const char *text, int type);
+Buffer *cm_buf_open(const char *path, char **err);
+void    cm_buf_free(Buffer *b);
+int     cm_buf_save(Buffer *b, const char *path, char **err);
+int     cm_buf_reload(Buffer *b, char **err);
+int     cm_buf_modified(const Buffer *b);
+void    cm_buf_set_name(Buffer *b, const char *path);
+void    cm_buf_set_text(Buffer *b, const char *text, int len);
 
-Loc   buf_insert(Buffer *b, Loc at, const char *text, int len);
-void  buf_remove(Buffer *b, Loc a, Loc z);
-char *buf_get_text(const Buffer *b, Loc a, Loc z, int *len);
-Loc   buf_replace(Buffer *b, Loc a, Loc z, const char *text, int len);
-Loc   buf_end(const Buffer *b);
-Loc   buf_clamp(const Buffer *b, Loc l);
-Loc   buf_move_chars(const Buffer *b, Loc l, int n); /* +/- characters across lines */
-int   buf_char_at(const Buffer *b, Loc l);          /* code point or -1 at EOL */
-char *buf_full_text(const Buffer *b, int *len);
-void  buf_update_rules(Buffer *b);                  /* filetype detection */
-void  buf_invalidate_hl(Buffer *b, int from);
-void  buf_ensure_hl(Buffer *b, int line);           /* highlight line (and states before) */
-int   buf_undo(Buffer *b);
-int   buf_redo(Buffer *b);
-void  buf_mark_saved(Buffer *b);
-void  buf_set_option(Buffer *b, int id, const OptVal *v, int local);
-void  buf_option_changed(Buffer *b, int id);
-const char *buf_leading_ws(const Buffer *b, int y, int *len);
-char *buf_indent_string(const Buffer *b);
+Loc   cm_buf_insert(Buffer *b, Loc at, const char *text, int len);
+void  cm_buf_remove(Buffer *b, Loc a, Loc z);
+char *cm_buf_get_text(const Buffer *b, Loc a, Loc z, int *len);
+Loc   cm_buf_replace(Buffer *b, Loc a, Loc z, const char *text, int len);
+Loc   cm_buf_end(const Buffer *b);
+Loc   cm_buf_clamp(const Buffer *b, Loc l);
+Loc   cm_buf_move_chars(const Buffer *b, Loc l, int n); /* +/- characters across lines */
+int   cm_buf_char_at(const Buffer *b, Loc l);          /* code point or -1 at EOL */
+char *cm_buf_full_text(const Buffer *b, int *len);
+void  cm_buf_update_rules(Buffer *b);                  /* filetype detection */
+void  cm_buf_invalidate_hl(Buffer *b, int from);
+void  cm_buf_ensure_hl(Buffer *b, int line);           /* highlight line (and states before) */
+int   cm_buf_undo(Buffer *b);
+int   cm_buf_redo(Buffer *b);
+void  cm_buf_mark_saved(Buffer *b);
+void  cm_buf_set_option(Buffer *b, int id, const OptVal *v, int local);
+void  cm_buf_option_changed(Buffer *b, int id);
+const char *cm_buf_leading_ws(const Buffer *b, int y, int *len);
+char *cm_buf_indent_string(const Buffer *b);
 
-extern void (*buf_edit_hook)(Buffer *b, int type, Loc start, Loc end);
-extern Loc (*buf_get_cursor_hook)(Buffer *b, int *num); /* editing cursor for undo records */
-extern void (*buf_set_cursor_hook)(Buffer *b, Loc l, int num);
+extern void (*cm_buf_edit_hook)(Buffer *b, int type, Loc start, Loc end);
+extern Loc (*cm_buf_get_cursor_hook)(Buffer *b, int *num); /* editing cursor for undo records */
+extern void (*cm_buf_set_cursor_hook)(Buffer *b, Loc l, int num);
 
 /* ================================================================== */
 /* Cursors and panes                                                   */
@@ -184,9 +184,9 @@ typedef struct {
     Loc orig[2];    /* anchor; orig[0]..orig[1] for word/line selection */
 } Cursor;
 
-int  cur_has_sel(const Cursor *c);
-void cur_deselect(Cursor *c, int start);
-void cur_set_sel_to(Cursor *c, Loc l);
+int  cm_cur_has_sel(const Cursor *c);
+void cm_cur_deselect(Cursor *c, int start);
+void cm_cur_set_sel_to(Cursor *c, Loc l);
 
 enum { DRAG_CHAR, DRAG_WORD, DRAG_LINE };
 
@@ -195,10 +195,10 @@ typedef struct Pane {
     Cursor *cur;
     int ncur, ccap, active;
     int x, y, w, h;    /* full rect, statusline included */
-    int top, toprow;   /* first visible line and softwrap row within it */
+    int first_line, first_row;   /* first visible line and softwrap row within it */
     int left;          /* horizontal scroll in columns */
     int overwrite;
-    long long last_click;
+    p_s64 last_click;
     int clicks;
     Loc click_loc;
     int dragging, drag_mode;
@@ -210,32 +210,32 @@ typedef struct Pane {
 
 #define ACUR(p) (&(p)->cur[(p)->active])
 
-Pane *pane_new(Buffer *b);
-void  pane_free(Pane *p);
-void  pane_set_buffer(Pane *p, Buffer *b);
-int   pane_add_cursor(Pane *p, Loc l);
-void  pane_remove_cursor(Pane *p, int i);
-void  pane_merge_cursors(Pane *p);
-void  pane_reset_cursors(Pane *p);
+Pane *cm_pane_new(Buffer *b);
+void  cm_pane_free(Pane *p);
+void  cm_pane_set_buffer(Pane *p, Buffer *b);
+int   cm_pane_add_cursor(Pane *p, Loc l);
+void  cm_pane_remove_cursor(Pane *p, int i);
+void  cm_pane_merge_cursors(Pane *p);
+void  cm_pane_reset_cursors(Pane *p);
 
 /* geometry */
-int  pane_gutter_width(const Pane *p);
-int  pane_text_width(const Pane *p);
-int  pane_text_height(const Pane *p);
-int  pane_visual_x(const Pane *p, int y, int x);      /* byte offset -> column */
-int  pane_x_from_visual(const Pane *p, int y, int vx); /* column -> byte offset */
-int  pane_line_rows(const Pane *p, int y);            /* softwrap rows */
-void pane_loc_to_row(const Pane *p, Loc l, int *row, int *rvx);
-Loc  pane_row_to_loc(const Pane *p, int y, int row, int rvx);
-void pane_relocate(Pane *p);
-void pane_center(Pane *p);
-void pane_scroll(Pane *p, int n);
-int  pane_screen_to_loc(Pane *p, int sx, int sy, Loc *out);
-void cur_store_vx(Pane *p, Cursor *c);
-void cur_up(Pane *p, Cursor *c, int n);
-void cur_down(Pane *p, Cursor *c, int n);
-void cur_left(Pane *p, Cursor *c);
-void cur_right(Pane *p, Cursor *c);
+int  cm_pane_gutter_width(const Pane *p);
+int  cm_pane_text_width(const Pane *p);
+int  cm_pane_text_height(const Pane *p);
+int  cm_pane_visual_x(const Pane *p, int y, int x);      /* byte offset -> column */
+int  cm_pane_x_from_visual(const Pane *p, int y, int vx); /* column -> byte offset */
+int  cm_pane_line_rows(const Pane *p, int y);            /* softwrap rows */
+void cm_pane_loc_to_row(const Pane *p, Loc l, int *row, int *rvx);
+Loc  cm_pane_row_to_loc(const Pane *p, int y, int row, int rvx);
+void cm_pane_relocate(Pane *p);
+void cm_pane_center(Pane *p);
+void cm_pane_scroll(Pane *p, int n);
+int  cm_pane_screen_to_loc(Pane *p, int sx, int sy, Loc *out);
+void cm_cur_store_vx(Pane *p, Cursor *c);
+void cm_cur_up(Pane *p, Cursor *c, int n);
+void cm_cur_down(Pane *p, Cursor *c, int n);
+void cm_cur_left(Pane *p, Cursor *c);
+void cm_cur_right(Pane *p, Cursor *c);
 
 /* ================================================================== */
 /* Tabs and splits                                                     */
@@ -246,7 +246,7 @@ typedef struct Node {
     int kind;
     Pane *pane;
     struct Node *a, *b, *parent;
-    double ratio;
+    int ratio;         /* share of the first child, in thousandths (integer: exact everywhere) */
     int x, y, w, h;
 } Node;
 
@@ -255,15 +255,15 @@ typedef struct Tab {
     Pane *active;
 } Tab;
 
-Tab  *tab_new(Pane *p);
-void  tab_free(Tab *t);
-void  tab_layout(Tab *t, int x, int y, int w, int h);
-Pane *tab_split(Tab *t, Pane *p, Buffer *b, int vertical);
-void  tab_close_pane(Tab *t, Pane *p); /* frees pane */
-int   tab_npanes(Tab *t);
-Pane **tab_panes(Tab *t, int *n);     /* malloc'd array in order */
-Node *tab_find_node(Node *n, Pane *p);
-Pane *tab_pane_at(Tab *t, int x, int y);
+Tab  *cm_tab_new(Pane *p);
+void  cm_tab_free(Tab *t);
+void  cm_tab_layout(Tab *t, int x, int y, int w, int h);
+Pane *cm_tab_split(Tab *t, Pane *p, Buffer *b, int vertical);
+void  cm_tab_close_pane(Tab *t, Pane *p); /* frees pane */
+int   cm_tab_npanes(Tab *t);
+Pane **cm_tab_panes(Tab *t, int *n);     /* malloc'd array in order */
+Node *cm_tab_find_node(Node *n, Pane *p);
+Pane *cm_tab_pane_at(Tab *t, int x, int y);
 
 /* ================================================================== */
 /* Input events                                                        */
@@ -297,33 +297,33 @@ typedef struct {
     int rawlen;
 } InEvent;
 
-int   input_poll(InEvent *ev, int timeout_ms);
-void  input_free(InEvent *ev);
-int   key_parse(const char *name, int *key, int *mods);
-char *key_name(int key, int mods);  /* malloc'd canonical name */
+int   cm_input_poll(InEvent *ev, int timeout_ms);
+void  cm_input_free(InEvent *ev);
+int   cm_key_parse(const char *name, int *key, int *mods);
+char *cm_key_name(int key, int mods);  /* malloc'd canonical name */
 
 /* ================================================================== */
 /* Screen                                                              */
 
-void scr_init(void);
-void scr_fini(void);
-void scr_resize(void);
-int  scr_w(void);
-int  scr_h(void);
-void scr_clear(void);
-void scr_set(int x, int y, int cp, Style st);
-int  scr_puts(int x, int y, const char *s, Style st, int maxw);
-void scr_fill(int x, int y, int w, int h, int cp, Style st);
-Style scr_get_style(int x, int y);
-void scr_set_style(int x, int y, Style st);
-void scr_show_cursor(int x, int y);
-void scr_hide_cursor(void);
-void scr_flush(void);
-void scr_invalidate(void);
-void scr_set_mouse(int on);
-void scr_osc52(const char *text, int len);
-extern int scr_truecolor;
-int  scr_detect_truecolor(const char *opt); /* "auto", "on" or "off" */
+void cm_scr_init(void);
+void cm_scr_fini(void);
+void cm_scr_resize(void);
+int  cm_scr_w(void);
+int  cm_scr_h(void);
+void cm_scr_clear(void);
+void cm_scr_set(int x, int y, int cp, Style st);
+int  cm_scr_puts(int x, int y, const char *s, Style st, int maxw);
+void cm_scr_fill(int x, int y, int w, int h, int cp, Style st);
+Style cm_scr_get_style(int x, int y);
+void cm_scr_set_style(int x, int y, Style st);
+void cm_scr_show_cursor(int x, int y);
+void cm_scr_hide_cursor(void);
+void cm_scr_flush(void);
+void cm_scr_invalidate(void);
+void cm_scr_set_mouse(int on);
+void cm_scr_osc52(const char *text, int len);
+extern int cm_scr_truecolor;
+int  cm_scr_detect_truecolor(const char *opt); /* "auto", "on" or "off" */
 
 /* ================================================================== */
 /* Editor state                                                        */
@@ -370,7 +370,7 @@ typedef struct {
     struct MacroItem *macro;
     int nmacro, cmacro;
     int playing_macro;
-    long long last_autosave;
+    p_s64 last_autosave;
     int redraw;
     InEvent *cur_event;
     int cut_line_streak; /* consecutive CutLine appends to clipboard */
@@ -384,83 +384,91 @@ typedef struct MacroItem {
     int rune;
 } MacroItem;
 
-extern Editor E;
+extern Editor cm_E;
 
-Tab  *cur_tab(void);
-Pane *cur_pane(void);
-void  editor_add_tab(Pane *p);
-void  editor_close_tab(int i);
-void  editor_layout(void);
-void  editor_set_message(const char *fmt, ...);
-void  editor_set_error(const char *fmt, ...);
-void  editor_clear_message(void);
-Pane *editor_open_file_pane(const char *path, char **err);
-Buffer *editor_find_buffer(const char *path);
-void  editor_all_panes(void (*fn)(Pane *, void *), void *data);
-void  editor_quit_pane(Pane *p, int force);
+Tab  *cm_cur_tab(void);
+Pane *cm_cur_pane(void);
+void  cm_editor_add_tab(Pane *p);
+void  cm_editor_close_tab(int i);
+void  cm_editor_layout(void);
+void  cm_editor_set_message(const char *fmt, ...);
+void  cm_editor_set_error(const char *fmt, ...);
+void  cm_editor_clear_message(void);
+Pane *cm_editor_open_file_pane(const char *path, char **err);
+Buffer *cm_editor_find_buffer(const char *path);
+void  cm_editor_all_panes(void (*fn)(Pane *, void *), void *data);
+void  cm_editor_quit_pane(Pane *p, int force);
 void  editor_refresh_all(void);
-void  editor_render(void);
-void  editor_handle_event(InEvent *ev);
-void  editor_log(const char *fmt, ...);
+void  cm_editor_render(void);
+void  cm_editor_handle_event(InEvent *ev);
+void  cm_editor_log(const char *fmt, ...);
+void  cm_editor_init_hooks(void);
+void  cm_editor_check_file_changes(void);
+void  cm_editor_autosave_tick(void);
 
 /* rendering */
-void render_pane(Pane *p, int active);
-void render_tabbar(void);
-void render_infobar(void);
-void render_keymenu(void);
-int  layout_top(void);
-int  layout_bottom_reserved(void);
+void cm_render_pane(Pane *p, int active);
+void cm_render_tabbar(void);
+void cm_render_infobar(void);
+void cm_render_keymenu(void);
+int  cm_layout_top(void);
+int  cm_layout_bottom_reserved(void);
 
 /* prompt */
-void prompt_text(const char *msg, const char *initial, int hist, PromptDone done,
+void cm_prompt_text(const char *msg, const char *initial, int hist, PromptDone done,
                  PromptChanged changed, void *data);
-void prompt_yn(const char *msg, YNDone done, void *data);
-void prompt_cancel(void);
-int  prompt_active(void);
-int  prompt_handle(InEvent *ev);
-void history_add(int kind, const char *s);
-void history_load(void);
-void history_save(void);
+void cm_prompt_yn(const char *msg, YNDone done, void *data);
+void cm_prompt_cancel(void);
+int  cm_prompt_active(void);
+int  cm_prompt_handle(InEvent *ev);
+void cm_history_add(int kind, const char *s);
+void cm_history_load(void);
+void cm_history_save(void);
 
 /* actions and bindings */
 typedef int (*ActionFn)(Pane *p);
 
-ActionFn action_find(const char *name);
-int      action_is_multi(const char *name);
-int      run_action_string(Pane *p, const char *actions, InEvent *ev);
-void     bindings_init(void);
-void     bindings_load_user(void);
-int      bind_key(const char *keyname, const char *action, int save);
-int      unbind_key(const char *keyname, int save);
-const char *binding_for_event(InEvent *ev, int prompt);
-const char *binding_key_for_action(const char *action);
-const char **action_names(int *n);
-int      insert_rune(Pane *p, int r);
-void     insert_text(Pane *p, const char *s, int len, int paste);
-void     clipboard_set(const char *s, int len, int lines);
-char    *clipboard_get(int *len);
-void     macro_record(int kind, const char *s, int len, int rune);
+ActionFn cm_action_find(const char *name);
+int      cm_action_is_multi(const char *name);
+int      cm_run_action_string(Pane *p, const char *actions, InEvent *ev);
+void     cm_bindings_init(void);
+void     cm_bindings_load_user(void);
+int      cm_bind_key(const char *keyname, const char *action, int save);
+int      cm_unbind_key(const char *keyname, int save);
+const char *cm_binding_for_event(InEvent *ev, int prompt);
+const char *cm_binding_key_for_action(const char *action);
+const char **cm_action_names(int *n);
+int      cm_insert_rune(Pane *p, int r);
+void     cm_insert_text(Pane *p, const char *s, int len, int paste);
+void     cm_clipboard_set(const char *s, int len, int lines);
+char    *cm_clipboard_get(int *len);
+void     cm_macro_record(int kind, const char *s, int len, int rune);
+int      cm_save_pane(Pane *p, int then_quit);
+int      cm_autocomplete_suggestions(Pane *p, char ***out, int *idx);
+int      cm_find_matching_brace(Buffer *b, Loc cur, int left, Loc *brace, Loc *match);
 
 /* search */
-int  search_find(Pane *p, const char *pat, int regex, Loc from, int down, Loc *ms, Loc *me, char **err);
-void search_highlight_ranges(Pane *p, int y, unsigned char *mask, int len);
+int  cm_search_find(Pane *p, const char *pat, int regex, Loc from, int down, Loc *ms, Loc *me, char **err);
+void cm_search_highlight_ranges(Pane *p, int y, unsigned char *mask, int len);
 
 /* backups, savecursor, sudo save (backup.c) */
-void backup_tick(void);
-void backup_remove(Buffer *b);
-int  backup_check_on_open(Buffer *b);
-void cursor_save(Pane *p);
-void cursor_restore(Pane *p);
-int  buf_save_sudo(Buffer *b, const char *path, char **err);
-int  term_prompt(const char *msg, const char *const *choices, int nchoices);
-extern int term_ready;
+void cm_backup_tick(void);
+void cm_backup_remove(Buffer *b);
+int  cm_backup_check_on_open(Buffer *b);
+void cm_cursor_save(Pane *p);
+void cm_cursor_restore(Pane *p);
+int  cm_buf_save_sudo(Buffer *b, const char *path, char **err);
+int  cm_term_prompt(const char *msg, const char *const *choices, int nchoices);
+extern int cm_term_ready;
 
 /* commands */
-void command_run(Pane *p, const char *line);
-char **command_complete(const char *input, int cursor, int *start);
-const char **command_names(int *n);
-void help_open(Pane *p, const char *topic);
-void apply_ftoptions(Buffer *b);
-void set_option_cmd(Pane *p, const char *name, const char *value, int local);
+void cm_command_run(Pane *p, const char *line);
+void cm_run_shell_interactive(const char *cmd);
+char **cm_file_complete(const char *arg, int *n);
+char **cm_command_complete(const char *input, int cursor, int *start);
+const char **cm_command_names(int *n);
+void cm_help_open(Pane *p, const char *help_name);
+void cm_apply_ftoptions(Buffer *b);
+void cm_set_option_cmd(Pane *p, const char *name, const char *value, int local);
 
 #endif

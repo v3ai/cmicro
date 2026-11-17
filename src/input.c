@@ -16,7 +16,7 @@ static int inlen;
 static int fill(int timeout) {
     int n;
     if (inlen >= (int)sizeof inbuf) return 0;
-    n = plat_read((char *)inbuf + inlen, (int)sizeof inbuf - inlen, timeout);
+    n = cm_plat_read((char *)inbuf + inlen, (int)sizeof inbuf - inlen, timeout);
     if (n > 0) inlen += n;
     return n;
 }
@@ -165,7 +165,7 @@ static int parse_plain(InEvent *ev, int off, int alt) {
     } else if (c < 128) key = c;
     else {
         int cp, n;
-        n = utf8_decode((const char *)inbuf + off, inlen - off, &cp);
+        n = cm_utf8_decode((const char *)inbuf + off, inlen - off, &cp);
         if (n == 1 && (c & 0xE0) >= 0xC0) {
             /* possibly incomplete sequence */
             int need = (c & 0xF0) == 0xF0 ? 4 : (c & 0xE0) == 0xE0 ? 3 : 2;
@@ -180,26 +180,26 @@ static int parse_plain(InEvent *ev, int off, int alt) {
 
 static int read_paste(InEvent *ev, int start) {
     Str s;
-    long long deadline = plat_now_ms() + 2000;
-    str_init(&s);
-    str_reserve(&s, 0);
+    p_s64 deadline = cm_plat_now_ms() + 2000;
+    cm_str_init(&s);
+    cm_str_reserve(&s, 0);
     consume(start);
     for (;;) {
         int i;
         for (i = 0; i + 5 < inlen; i++) {
             if (!memcmp(inbuf + i, "\x1b[201~", 6)) {
-                str_putn(&s, (const char *)inbuf, i);
+                cm_str_putn(&s, (const char *)inbuf, i);
                 consume(i + 6);
                 goto done;
             }
         }
         /* keep the last 5 bytes in case the terminator is split */
         if (inlen > 5) {
-            str_putn(&s, (const char *)inbuf, inlen - 5);
+            cm_str_putn(&s, (const char *)inbuf, inlen - 5);
             consume(inlen - 5);
         }
-        if (fill(100) <= 0 && plat_now_ms() > deadline) {
-            str_putn(&s, (const char *)inbuf, inlen);
+        if (fill(100) <= 0 && cm_plat_now_ms() > deadline) {
+            cm_str_putn(&s, (const char *)inbuf, inlen);
             consume(inlen);
             break;
         }
@@ -219,20 +219,20 @@ done:
     }
     ev->type = IN_PASTE;
     ev->pastelen = s.len;
-    ev->paste = str_detach(&s);
+    ev->paste = cm_str_detach(&s);
     return 1;
 }
 
-int input_poll(InEvent *ev, int timeout_ms) {
+int cm_input_poll(InEvent *ev, int timeout_ms) {
     int n;
     memset(ev, 0, sizeof *ev);
-    if (plat_resized()) {
+    if (cm_plat_resized()) {
         ev->type = IN_RESIZE;
         return 1;
     }
     if (inlen == 0) {
         if (fill(timeout_ms) <= 0) {
-            if (plat_resized()) { ev->type = IN_RESIZE; return 1; }
+            if (cm_plat_resized()) { ev->type = IN_RESIZE; return 1; }
             return 0;
         }
     }
@@ -254,7 +254,7 @@ int input_poll(InEvent *ev, int timeout_ms) {
                 }
                 if (n < 0) return read_paste(ev, -n);
                 consume(n);
-                return ev->type != IN_NONE ? 1 : input_poll(ev, 0);
+                return ev->type != IN_NONE ? 1 : cm_input_poll(ev, 0);
             }
             if (inbuf[1] == 'O') {
                 int key = 0;
@@ -302,7 +302,7 @@ int input_poll(InEvent *ev, int timeout_ms) {
     }
 }
 
-void input_free(InEvent *ev) {
+void cm_input_free(InEvent *ev) {
     free(ev->paste);
     ev->paste = NULL;
 }
@@ -333,16 +333,16 @@ static const struct {
     {"MouseWheelLeft", KEY_WHEEL_LEFT, 0}, {"MouseWheelRight", KEY_WHEEL_RIGHT, 0},
 };
 
-int key_parse(const char *name, int *key, int *mods) {
+int cm_key_parse(const char *name, int *key, int *mods) {
     const char *k = name;
     int m = 0;
     size_t i;
     if (!*k) return 0;
     for (;;) {
         if (*k == '-' && k[1]) { k++; continue; }
-        if (starts_with(k, "Ctrl") && strcmp(k, "CtrlH") != 0 && k[4]) { k += 4; m |= MOD_CTRL; continue; }
-        if (starts_with(k, "Alt") && k[3]) { k += 3; m |= MOD_ALT; continue; }
-        if (starts_with(k, "Shift") && k[5]) { k += 5; m |= MOD_SHIFT; continue; }
+        if (cm_starts_with(k, "Ctrl") && strcmp(k, "CtrlH") != 0 && k[4]) { k += 4; m |= MOD_CTRL; continue; }
+        if (cm_starts_with(k, "Alt") && k[3]) { k += 3; m |= MOD_ALT; continue; }
+        if (cm_starts_with(k, "Shift") && k[5]) { k += 5; m |= MOD_SHIFT; continue; }
         break;
     }
     if (!strcmp(k, "CtrlH")) { *key = 'h'; *mods = m | MOD_CTRL; return 1; }
@@ -355,11 +355,11 @@ int key_parse(const char *name, int *key, int *mods) {
         }
     }
     if (k[0] == 'F' && isdigit((unsigned char)k[1])) {
-        int n = atoi(k + 1);
+        int n = cm_clamped_atoi(k + 1);
         if (n >= 1 && n <= 64) { *key = KEY_F1 + n - 1; *mods = m; return 1; }
     }
     {
-        int cp, n = utf8_decode(k, (int)strlen(k), &cp);
+        int cp, n = cm_utf8_decode(k, (int)strlen(k), &cp);
         if (n > 0 && k[n] == 0) {
             if (m & MOD_CTRL) {
                 if (cp < 128) cp = tolower(cp);
@@ -374,39 +374,39 @@ int key_parse(const char *name, int *key, int *mods) {
     return 0;
 }
 
-char *key_name(int key, int mods) {
+char *cm_key_name(int key, int mods) {
     Str s;
     size_t i;
-    str_init(&s);
-    str_reserve(&s, 0);
+    cm_str_init(&s);
+    cm_str_reserve(&s, 0);
     if (key < KEY_SPECIAL) {
         char buf[8];
-        if (key == ' ' && (mods & MOD_CTRL) && !(mods & ~MOD_CTRL)) return xstrdup("CtrlSpace");
-        if (mods & MOD_CTRL) str_puts(&s, "Ctrl");
-        if (mods & MOD_ALT) str_puts(&s, "Alt");
-        if (mods & MOD_SHIFT) str_puts(&s, "Shift");
-        if (mods) str_putc(&s, '-');
-        buf[utf8_encode(key, buf)] = 0;
-        str_puts(&s, buf);
-        return str_detach(&s);
+        if (key == ' ' && (mods & MOD_CTRL) && !(mods & ~MOD_CTRL)) return cm_xstrdup("CtrlSpace");
+        if (mods & MOD_CTRL) cm_str_puts(&s, "Ctrl");
+        if (mods & MOD_ALT) cm_str_puts(&s, "Alt");
+        if (mods & MOD_SHIFT) cm_str_puts(&s, "Shift");
+        if (mods) cm_str_putc(&s, '-');
+        buf[cm_utf8_encode(key, buf)] = 0;
+        cm_str_puts(&s, buf);
+        return cm_str_detach(&s);
     }
-    if (mods & MOD_CTRL) str_puts(&s, "Ctrl");
-    if (mods & MOD_ALT) str_puts(&s, "Alt");
-    if (mods & MOD_SHIFT) str_puts(&s, "Shift");
+    if (mods & MOD_CTRL) cm_str_puts(&s, "Ctrl");
+    if (mods & MOD_ALT) cm_str_puts(&s, "Alt");
+    if (mods & MOD_SHIFT) cm_str_puts(&s, "Shift");
     if (key >= KEY_F1 && key < KEY_F1 + 64) {
-        str_printf(&s, "F%d", key - KEY_F1 + 1);
-        return str_detach(&s);
+        cm_str_printf(&s, "F%d", key - KEY_F1 + 1);
+        return cm_str_detach(&s);
     }
     for (i = 0; i < sizeof keynames / sizeof keynames[0]; i++) {
         if (keynames[i].key == key && keynames[i].mods == 0) {
             if ((key >= KEY_MOUSE_FIRST) && mods) {
                 /* micro writes mouse modifiers with a dash: Ctrl-MouseLeft */
-                str_putc(&s, '-');
+                cm_str_putc(&s, '-');
             }
-            str_puts(&s, keynames[i].name);
-            return str_detach(&s);
+            cm_str_puts(&s, keynames[i].name);
+            return cm_str_detach(&s);
         }
     }
-    str_puts(&s, "Unknown");
-    return str_detach(&s);
+    cm_str_puts(&s, "Unknown");
+    return cm_str_detach(&s);
 }

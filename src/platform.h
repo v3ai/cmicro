@@ -2,14 +2,11 @@
  * platform.h - the only non-ISO-C surface of the editor.
  *
  * ISO C has no notion of a terminal, raw keyboard input, window size,
- * directories or wall-clock milliseconds, and its file functions don't
- * define how file names are encoded.  Everything that needs those lives
- * behind this interface, implemented twice:
- *   platform.c        POSIX (Linux, macOS, BSDs, WSL, Cygwin)
- *   platform_win32.c  native Windows (console API, UTF-16 file APIs)
- * Each file compiles to (almost) nothing on the other platform, so
- * compiling every .c file in src/ with one cc command
- * works everywhere.  All strings crossing this interface are UTF-8.
+ * directories or wall-clock milliseconds.  Everything that needs those
+ * lives behind this interface, implemented for POSIX systems (Linux,
+ * macOS, the BSDs, WSL, Cygwin) in platform.c.  Every other file uses
+ * only the C89 standard library.  All strings crossing this interface
+ * are UTF-8.
  */
 #ifndef PLATFORM_H
 #define PLATFORM_H
@@ -17,55 +14,46 @@
 #include <stddef.h>
 #include <stdio.h>
 
-/* terminal */
-int  plat_term_init(void);              /* enter raw mode; 0 on success */
-void plat_term_restore(void);           /* leave raw mode */
-int  plat_term_size(int *w, int *h);    /* 0 on success */
-int  plat_read(char *buf, int n, int timeout_ms); /* bytes read, 0 on timeout, -1 err */
-void plat_write(const char *buf, size_t n);
-int  plat_resized(void);                /* returns 1 once after a resize */
-int  plat_can_suspend(void);
-int  plat_suspend(void);                /* Ctrl-Z style suspend (SIGTSTP) */
-int  plat_stdin_is_tty(void);
-int  plat_reopen_tty(void);             /* after reading piped stdin */
-char *plat_read_stdin(long *len);       /* read all of (piped) stdin */
-void plat_args(int *argc, char ***argv); /* command line as UTF-8 */
+#include "port.h"
 
-long long plat_now_ms(void);
+#if !P_HAS_64
+#  error "cmicro needs a 64-bit integer type for timestamps"
+#endif
+
+/* terminal */
+int  cm_plat_term_init(void);              /* enter raw mode; 0 on success */
+void cm_plat_term_restore(void);           /* leave raw mode */
+int  cm_plat_term_size(int *w, int *h);    /* 0 on success */
+int  cm_plat_read(char *buf, int n, int timeout_ms); /* bytes read, 0 on timeout, -1 err */
+void cm_plat_write(const char *buf, size_t n);
+int  cm_plat_resized(void);                /* returns 1 once after a resize */
+int  cm_plat_suspend(void);                /* Ctrl-Z style suspend (SIGTSTP) */
+int  cm_plat_stdin_is_tty(void);
+int  cm_plat_reopen_tty(void);             /* after reading piped stdin */
+char *cm_plat_read_stdin(long *len);       /* read all of (piped) stdin */
+
+p_s64 cm_plat_now_ms(void);                /* wall clock, milliseconds */
 
 /* files and directories */
-FILE *plat_fopen(const char *path, const char *mode);
-int   plat_remove(const char *path);
-int   plat_is_dir(const char *path);
-int   plat_exists(const char *path);
-int   plat_is_writable(const char *path);
-long long plat_mtime(const char *path);
-int   plat_mkdir_p(const char *path);
-char *plat_getcwd(void);                /* malloc'd */
-int   plat_chdir(const char *path);
-char *plat_realpath(const char *path);  /* malloc'd, NULL if it doesn't exist */
-int   plat_is_sep(int c);               /* path separator? */
-int   plat_is_abs(const char *path);
+int   cm_plat_is_dir(const char *path);
+int   cm_plat_exists(const char *path);
+int   cm_plat_is_writable(const char *path);
+p_s64 cm_plat_mtime(const char *path);     /* seconds; 0 if it doesn't exist */
+int   cm_plat_mkdir_p(const char *path);
+char *cm_plat_getcwd(void);                /* malloc'd */
+int   cm_plat_chdir(const char *path);
+char *cm_plat_realpath(const char *path);  /* malloc'd, NULL if it doesn't exist */
 
 /* list directory entries (malloc'd array of malloc'd names, NULL terminated).
    Directories get a trailing '/'. */
-char **plat_list_dir(const char *path);
+char **cm_plat_list_dir(const char *path);
 
 /* environment and processes */
-char *plat_getenv(const char *name);    /* malloc'd or NULL */
-char *plat_home_dir(void);              /* malloc'd or NULL */
-char *plat_temp_dir(void);              /* malloc'd */
-int   plat_system(const char *cmd);
-const char *plat_null_device(void);
-char *plat_shell_quote(const char *s);  /* malloc'd */
-/* shell command line running `cmd` with stdin from `in` (NULL: null device)
+char *cm_plat_getenv(const char *name);    /* malloc'd or NULL */
+char *cm_plat_home_dir(void);              /* malloc'd or NULL */
+char *cm_plat_temp_dir(void);              /* malloc'd */
+/* sh command line running `cmd` with stdin from `in` (NULL: /dev/null)
    and stdout+stderr to `out`; malloc'd */
-char *plat_capture_cmd(const char *cmd, const char *in, const char *out);
-int   plat_has_sudo(void);
-const char *plat_default_fileformat(void); /* "unix" or "dos" */
-
-/* native clipboard: 0 on success, -1 if this platform has none built in */
-int   plat_clipboard_set(const char *s, int len);
-char *plat_clipboard_get(int *len);     /* malloc'd, NULL if unavailable */
+char *cm_plat_capture_cmd(const char *cmd, const char *in, const char *out);
 
 #endif
