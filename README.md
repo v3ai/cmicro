@@ -1,9 +1,10 @@
 # cmicro: micro, rewritten in C
 
 The [micro](https://github.com/micro-editor/micro) terminal text editor,
-rewritten from scratch in C99 with no dependencies. Same keys, commands,
-settings, syntax highlighting and colorschemes as micro. Runs on Linux,
-macOS, the BSDs and natively on Windows.
+rewritten from scratch in [Universal C](https://github.com/v3ai/universal-c)
+with no dependencies: C89 that compiles unchanged as C89, C99, C11, C17 and
+C23. Same keys, commands, settings, syntax highlighting and colorschemes as
+micro. Runs on Linux, macOS, the BSDs, WSL and Cygwin.
 
 ![cmicro editing C and Python side by side in a vertical split, with tabs, syntax highlighting and search matches highlighted](docs/screenshot.png)
 
@@ -16,7 +17,7 @@ make
 
 micro is a modern, intuitive terminal editor: Ctrl-S saves, Ctrl-Q quits,
 Ctrl-C/Ctrl-V copy and paste, and the mouse just works. The original is
-written in Go. cmicro is a full reimplementation in portable C99 that needs
+written in Go. cmicro is a full reimplementation in portable C that needs
 nothing but a C compiler and the C library. It builds in seconds into a
 single ~700 KB executable with every syntax file and colorscheme built in.
 
@@ -38,8 +39,9 @@ Highlights:
   on disk, saving through sudo on permission errors
 - **Everything from scratch:** its own regular-expression engine (Go/RE2
   syntax, tested against Go's), YAML and JSON parsers and terminal renderer
-- **Portable:** one small platform layer for POSIX systems and one for the
-  Windows console; everything else is standard C
+- **Portable:** everything but one small POSIX file is Universal C: no
+  compiler extensions, no undefined or implementation-defined behavior, and
+  the same output with signed or unsigned `char` and on big-endian systems
 
 Not included: micro's Lua plugin system, its built-in terminal emulator and
 the git diff gutter.
@@ -49,8 +51,6 @@ the git diff gutter.
 Prebuilt binaries are on the
 [Releases](https://github.com/v3ai/cmicro/releases) page:
 
-- `micro.exe`: Windows 10 (1809) or later. Run it from PowerShell, cmd or
-  Windows Terminal; no installation needed.
 - `micro-linux-x86_64`: statically linked Linux build
   (`chmod +x micro-linux-x86_64`).
 
@@ -58,78 +58,84 @@ Or build it yourself; see below.
 
 ## Building
 
-Requirements: any C99 compiler (developed with gcc 13 and clang; uses
-nothing newer than C99).
+Requirements: any C compiler for C89 or later, on a POSIX system (Linux,
+macOS, the BSDs, WSL, Cygwin).
 
 ```
-make                 # builds ./micro (micro.exe on Windows)
-make test            # compiles every regex in every bundled syntax file
+make                 # builds ./micro
+make test            # runs the formatter test and compiles/runs every regex
+make check           # Universal C conformance (see below)
 make install         # installs to /usr/local/bin (PREFIX=... to change)
-make windows         # cross-compiles micro.exe with MinGW-w64
 make runtime         # re-embed runtime/ files after editing them (needs python3)
 ```
 
-Without make, one command builds it on any platform, because each platform
-file compiles to nothing on the other system:
+Without make, one command builds it:
 
 ```
 cc -O2 -o micro src/*.c
 ```
 
-The build is warning-free with `-std=c99 -Wall -Wextra -pedantic` under
-gcc, clang and MinGW-w64.
+The default build uses `-std=c89 -Wall -Wextra -pedantic`.
 
-## Windows
+### Windows
 
-`micro.exe` is a native Windows console program. It needs Windows 10
-version 1809 or later (for the console's escape-sequence support) and works
-in PowerShell, cmd and Windows Terminal.
+Native Windows support has been removed. On Windows, run cmicro inside
+[WSL](https://learn.microsoft.com/windows/wsl/) or Cygwin, where it builds
+and behaves exactly as on Linux.
 
-Building on Windows with [MSYS2](https://www.msys2.org):
+## Universal C
 
-```
-pacman -S mingw-w64-ucrt-x86_64-gcc make
-make
-```
+cmicro follows the [Universal C](https://github.com/v3ai/universal-c) rules:
+code that compiles on every conforming C compiler from C89 through C23 and
+behaves the same on every platform. Concretely:
 
-or, from any shell with MinGW-w64 gcc on the PATH:
-`gcc -O2 -o micro.exe src/*.c`. To build it from Linux: `make windows`
-(produces a statically linked `micro.exe`).
+- **C89 dialect, any standard.** Every file compiles with zero warnings
+  under gcc and clang with `-std=c89`, `c99`, `c11`, `c17` and `c2x`,
+  `-pedantic-errors -Werror` and the strict warning set (`-Wconversion`,
+  `-Wsign-conversion`, `-Wshadow`, `-Wformat=2`, ...).
+- **C89 library only.** No `snprintf`, `long long`, `stdint.h` or other
+  later additions outside `src/port.h`. Formatting goes through
+  `cm_str_vprintf`, a small C89 replacement for `vsnprintf`; numbers are
+  parsed with a clamped `strtol` wrapper instead of `atoi`.
+- **One portability header.** `src/port.h` is copied unchanged from the
+  standard; it provides exact-width types (`p_u32`, `p_s64`), static
+  assertions and the only compiler- and version-specific `#if`s.
+- **No undefined or implementation-defined behavior relied on.** Bit
+  operations are on unsigned types, conversions are range-checked, `<ctype.h>`
+  arguments are cast to `unsigned char`, layout and size display use integer
+  arithmetic, and the output is the same with signed or unsigned `char` and
+  on big-endian machines.
+- **Translation limits.** No string literal over 509 characters, no object
+  over 32767 bytes (runtime files are embedded as byte arrays, one per file).
+- **Names.** Every external symbol has the `cm_` prefix, and no identifier
+  is a keyword or reserved name of any C standard or C++.
 
-Then run it from PowerShell like any program, e.g. `.\micro.exe notes.txt`,
-or put it on your PATH.
+The only file that goes beyond the C89 library is `src/platform.c` (see
+below), as the rules allow for things ISO C cannot do. The editor states
+two assumptions explicitly, both guaranteed by POSIX: `int` has at least 32
+bits and a 64-bit integer type exists (`P_HAS_64`); the build fails
+otherwise.
 
-How it differs from the Unix build:
+`make check` runs `tools/check.sh`, which verifies all of this:
 
-- Config lives in `%USERPROFILE%\.config\micro` (as in micro), unless
-  `MICRO_CONFIG_HOME` or `XDG_CONFIG_HOME` is set.
-- New files default to `dos` (CRLF) line endings, like micro on Windows;
-  existing files keep whatever line endings they have.
-- Paths may use `\` or `/`; in the command bar a backslash is a path
-  separator, not an escape, and names with spaces are completed in quotes.
-- Shell commands (`run`, `textfilter`, Ctrl-b) run through `cmd.exe`.
-- The clipboard is the native Windows clipboard.
-- Non-ASCII file names work everywhere (all file access uses the UTF-16
-  Windows APIs).
-- Not available: saving through `sudo` and suspending with Ctrl-z.
-- Truecolor is used automatically in Windows Terminal; elsewhere colors are
-  mapped to the 256-color palette (`set truecolor on` to force it).
+1. the compile matrix above, for every source and test file;
+2. a scan for constructs `-std=c89` lets through (C95 headers, trigraphs,
+   headers outside the C89 library);
+3. builds of the tests and the editor that must all print identical output:
+   native, AddressSanitizer + UndefinedBehaviorSanitizer, MemorySanitizer,
+   unsigned and signed plain `char`, 32-bit (`-m32`) and big-endian s390x
+   under QEMU. Configurations whose tools are missing are skipped and
+   listed.
 
-## "Only the C standard library"
+## The platform layer
 
-Everything is written against the ISO C standard library, with one
-unavoidable exception: ISO C has no notion of a terminal. Raw keyboard input,
-the window size, resize notification, directory listings (for tab
-completion) and millisecond clocks don't exist in the standard library, and
-it doesn't define how file names are encoded. Those calls are isolated
-behind the small interface in `src/platform.h`, implemented twice:
+ISO C has no notion of a terminal. Raw keyboard input, the window size,
+resize notification, directory listings (for tab completion) and
+millisecond clocks don't exist in the standard library. Those calls are
+isolated behind the small interface in `src/platform.h`, implemented for
+POSIX (termios, ioctl, poll, opendir, stat, realpath) in `src/platform.c`.
 
-- `src/platform.c`: POSIX (termios, ioctl, poll, opendir, stat, realpath)
-  for Linux, macOS, the BSDs, WSL and Cygwin;
-- `src/platform_win32.c`: the Windows console API in virtual-terminal mode,
-  with the UTF-16 file APIs and the native clipboard.
-
-Every other file includes only standard headers.
+Every other file includes only C89 standard headers.
 
 Things micro gets from Go's standard library or third-party packages are
 implemented here directly:
@@ -143,6 +149,7 @@ implemented here directly:
 | `go-runewidth`                     | `src/util.c`: East-Asian-wide / combining tables |
 | Lua plugins `autoclose`, `comment`, `ftoptions`, `status` | built in natively |
 | `os/exec` for shell commands       | ISO C `system()`                               |
+| `fmt.Sprintf`                      | `src/util.c`: C89 formatter (`cm_str_vprintf`)  |
 
 ## Feature coverage
 
@@ -192,8 +199,8 @@ message.
 ## Layout
 
 ```
-src/platform.c   POSIX terminal/filesystem glue
-src/platform_win32.c  Windows console/filesystem glue
+src/port.h       Universal C portability header (from the standard, unchanged)
+src/platform.c   POSIX terminal/filesystem glue (the only non-C89 file)
 src/main.c       command line, startup, main loop
 src/editor.c     editor state, tabs, event dispatch, frame rendering
 src/actions.c    every bindable action, typing, clipboard, search, macros
@@ -212,15 +219,24 @@ src/conf.c       YAML and JSON parsers/writers
 src/screen.c     cell grid + ANSI output
 src/input.c      key/mouse/paste decoding, key names
 src/options.c    option table, settings.json
+src/util.c       strings, C89 formatter, UTF-8, paths, allocation
 src/runtime*.c   embedded runtime files (generated by tools/embed.py)
 runtime/         micro's syntax files and colorschemes (MIT), help pages
+tests/           formatter and regex tests, pty test harness (term.py)
+tools/check.sh   Universal C conformance checks (make check)
 tools/screenshot.py  regenerates docs/screenshot.png (needs pyte, pillow)
 ```
 
 ## Testing
 
-- `make test` compiles all 3,794 regular expressions from micro's syntax
-  files with the built-in engine.
+- `make test` checks the C89 formatter against fixed expected output, and
+  compiles all 3,794 regular expressions from micro's syntax files with the
+  built-in engine and runs each over its syntax file, printing a hash of
+  every match position.
+- `make check` runs the Universal C checks described above; the test output
+  (including that hash) must be identical in every configuration. The
+  formatter was also differential-tested against glibc's `snprintf`
+  (36,800 format/argument combinations, identical).
 - The regex engine is differential-tested against Go's `regexp`: every
   bundled syntax pattern against 365 sample lines (53,328 lines of match and
   capture output) is identical, plus ~1.3M randomly generated RE2 patterns.
@@ -232,11 +248,13 @@ tools/screenshot.py  regenerates docs/screenshot.png (needs pyte, pillow)
   with scripted scenarios and randomized key/mouse/paste fuzzing, and the
   code was reviewed independently against micro's Go source; the issues
   found were fixed and their reproductions re-run clean.
-- The Windows build is cross-compiled with MinGW-w64 and was exercised
-  under Wine: editing, selection, clipboard, UTF-8 text and file names,
-  saving with CRLF defaults, search, splits, `cmd.exe` commands, settings and
-  crash-recovery backups. (It hasn't yet been run on a physical Windows
-  machine; Wine itself can't test Ctrl-C as a key or window resizing.)
+- The Universal C version was checked against the previous C99 build with
+  a scripted pseudo-terminal session (splits, tabs, search, replace, undo,
+  multiple cursors, mouse, softwrap, colorschemes, help, shell filters,
+  resize): all 43 screens, including cursor position and colors, are
+  identical natively, with unsigned `char`, and on big-endian s390x under
+  QEMU, and the session runs clean under AddressSanitizer and
+  UndefinedBehaviorSanitizer.
 - Highlighting long minified lines is linear: a 620 KB single-line
   JavaScript file highlights in about half a second.
 
