@@ -254,23 +254,27 @@ int cm_utf8_decode(const char *str, int len, int *cp) {
     return 1;
 }
 
+/* Bytes are stored through unsigned char: putting a value >= 0x80 into a
+   plain (possibly signed) char would be implementation-defined. */
 int cm_utf8_encode(int cp, char *out) {
-    if (cp < 0x80) { out[0] = (char)cp; return 1; }
-    if (cp < 0x800) {
-        out[0] = (char)(0xC0 | (cp >> 6));
-        out[1] = (char)(0x80 | (cp & 0x3F));
+    unsigned char *u = (unsigned char *)out;
+    p_u32 c = (p_u32)cp;
+    if (c < 0x80) { u[0] = (unsigned char)c; return 1; }
+    if (c < 0x800) {
+        u[0] = (unsigned char)(0xC0 | (c >> 6));
+        u[1] = (unsigned char)(0x80 | (c & 0x3F));
         return 2;
     }
-    if (cp < 0x10000) {
-        out[0] = (char)(0xE0 | (cp >> 12));
-        out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
-        out[2] = (char)(0x80 | (cp & 0x3F));
+    if (c < 0x10000) {
+        u[0] = (unsigned char)(0xE0 | (c >> 12));
+        u[1] = (unsigned char)(0x80 | ((c >> 6) & 0x3F));
+        u[2] = (unsigned char)(0x80 | (c & 0x3F));
         return 3;
     }
-    out[0] = (char)(0xF0 | (cp >> 18));
-    out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
-    out[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
-    out[3] = (char)(0x80 | (cp & 0x3F));
+    u[0] = (unsigned char)(0xF0 | ((c >> 18) & 0x07));
+    u[1] = (unsigned char)(0x80 | ((c >> 12) & 0x3F));
+    u[2] = (unsigned char)(0x80 | ((c >> 6) & 0x3F));
+    u[3] = (unsigned char)(0x80 | (c & 0x3F));
     return 4;
 }
 

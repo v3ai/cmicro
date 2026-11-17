@@ -10,6 +10,11 @@
    key codes).  POSIX guarantees this on every system the editor runs on. */
 P_STATIC_ASSERT(INT_MAX >= 2147483647L, int_is_32_bits);
 
+/* Timestamps (milliseconds, file times) use p_s64. */
+#if !P_HAS_64
+#  error "cmicro needs a 64-bit integer type (P_HAS_64)"
+#endif
+
 void *cm_xmalloc(size_t n);
 void *cm_xcalloc(size_t n, size_t m);
 void *cm_xrealloc(void *p, size_t n);

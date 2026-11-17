@@ -323,7 +323,8 @@ void cm_settings_note_set(const char *name, const char *value) {
         v->b = !strcmp(value, "on") || !strcmp(value, "true");
         v->str = cm_xstrdup(v->b ? "true" : "false");
     } else if (cm_opt_defs[id].type == OT_INT) {
-        int k = cm_clamped_atoi(value);
+        OptVal ov;
+        int k = cm_opt_parse(id, value, &ov, NULL) == 0 ? ov.i : cm_clamped_atoi(value);
         v = mknode(CN_NUM);
         v->num = k;
         v->str = cm_xsprintf("%d", k);

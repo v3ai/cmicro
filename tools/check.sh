@@ -21,7 +21,8 @@ FMT="tests/format_test.c src/util.c src/platform.c"
 RGX="tests/syntax_regex_test.c src/conf.c src/regex.c src/util.c src/platform.c"
 
 OUT=$(mktemp -d "${TMPDIR:-/tmp}/cmicro-check.XXXXXX") || exit 1
-trap 'rm -rf "$OUT"' EXIT INT TERM
+trap 'rm -rf "$OUT"' EXIT
+trap 'exit 130' INT TERM
 failed=0
 skipped=""
 

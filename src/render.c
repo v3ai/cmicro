@@ -95,9 +95,13 @@ static void status_subst(Pane *p, const char *fmt, Str *out) {
                 if (!strcmp(name, "status.bytes")) cm_str_printf(out, "%ld", sum);
                 else if (sum < 1024) cm_str_printf(out, "%ldB", sum);
                 else {
-                    /* one decimal, rounded half up, in integers (no float formatting) */
+                    /* one decimal in integer arithmetic (no float formatting),
+                       rounding ties to even like printf("%.1f") in micro */
                     long unit = sum < 1024L * 1024L ? 1024L : 1024L * 1024L;
-                    long tenths = (sum / unit) * 10 + ((sum % unit) * 10 + unit / 2) / unit;
+                    long rem = (sum % unit) * 10;
+                    long tenths = (sum / unit) * 10 + rem / unit;
+                    rem %= unit;
+                    if (rem * 2 > unit || (rem * 2 == unit && tenths % 2 != 0)) tenths++;
                     cm_str_printf(out, "%ld.%ld%s", tenths / 10, tenths % 10, unit == 1024L ? "KB" : "MB");
                 }
             } else if (cm_starts_with(name, "opt:")) {

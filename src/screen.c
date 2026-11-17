@@ -25,7 +25,8 @@ int cm_scr_detect_truecolor(const char *opt) {
     const char *ct = getenv("COLORTERM");
     if (!strcmp(opt, "on")) return 1;
     if (strcmp(opt, "auto") != 0) return 0;
-    return ct && (strstr(ct, "truecolor") || strstr(ct, "24bit"));
+    if (ct && (strstr(ct, "truecolor") || strstr(ct, "24bit"))) return 1;
+    return getenv("WT_SESSION") != NULL; /* Windows Terminal, e.g. running WSL */
 }
 
 static void emit(const char *s) { cm_str_puts(&out, s); }

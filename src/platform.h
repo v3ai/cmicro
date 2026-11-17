@@ -16,10 +16,6 @@
 
 #include "port.h"
 
-#if !P_HAS_64
-#  error "cmicro needs a 64-bit integer type for timestamps"
-#endif
-
 /* terminal */
 int  cm_plat_term_init(void);              /* enter raw mode; 0 on success */
 void cm_plat_term_restore(void);           /* leave raw mode */
